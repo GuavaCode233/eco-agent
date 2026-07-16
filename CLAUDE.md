@@ -58,7 +58,7 @@ eco-agent/
 
 | 步驟 | 內容 | 產出協定 | 觸發模式 | 狀態 |
 |------|------|----------|----------|------|
-| Step 0 | 地基：本機持久化佇列 + 配置常數 + 綁定 mock + 上傳骨架（四重觸發） | — | — | ⬜ |
+| Step 0 | 地基：本機持久化佇列 + 配置常數 + 綁定 mock + 上傳骨架（四重觸發） | — | — | ✅ |
 | Step 1 | 路徑 A：電腦使用（狀態值輪詢，短區間） | MQTT（mock 送出） | 固定區間輪詢 | ⬜ |
 | Step 2 | 路徑 C：雲端儲存（狀態值輪詢，長區間，真串 Google Drive） | HTTPS（mock 送出） | 持久化時間戳到期判斷 | ⬜ |
 | Step 3 | 路徑 B：印表機（僅個人專屬機 SNMP 輪詢歸戶） | MQTT（mock 送出） | 持久化時間戳到期判斷 | ⬜ |
@@ -73,7 +73,7 @@ eco-agent/
 | 0.2 | `internal/queue` | SQLite 持久化佇列，介面至少含 `Enqueue`／`PeekBatch(n)`／`MarkUploaded(ids)`／`OldestAge()`／`Count()`；每筆帶**唯一事件 ID**（`id_token + 日期 + 路徑類型` 組穩定鍵）供後端冪等去重 | ✅ |
 | 0.3 | `internal/enroll` | 提供 `IDToken()`／`AccessToken()` 等介面，現**回傳 mock 常數**（§7），照金鑰庫抽象預留真實實作 | ✅ |
 | 0.4 | `internal/uploader` | 實作**四重觸發**與 at-least-once（詳 §3），上傳函式先打 mock 端點（§7） | ✅ |
-| 0.V | 獨立驗證 | 手動 `Enqueue` 幾筆假資料，觀察四種觸發各自正確 flush、mock 端點收到、佇列僅在「200」後清除 | ⬜ |
+| 0.V | 獨立驗證 | 手動 `Enqueue` 幾筆假資料，觀察四種觸發各自正確 flush、mock 端點收到、佇列僅在「200」後清除 | ✅ |
 
 ### Step 1 — 路徑 A：電腦使用（狀態值輪詢，短區間）
 
