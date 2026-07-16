@@ -1,0 +1,35 @@
+# --- 編譯產物（單一靜態執行檔，交叉編譯輸出）---
+/eco-agent
+/eco-agent.exe
+/bin/
+/dist/
+*.exe
+*.dll
+*.so
+*.dylib
+
+# --- 測試與覆蓋率 ---
+*.test
+*.out
+coverage.*
+
+# --- 本機持久化佇列（SQLite，§4.4.3）——絕不可提交 ---
+*.db
+*.db-wal
+*.db-shm
+*.sqlite
+*.sqlite3
+
+# --- 憑證／秘密（§6 Google OAuth、token、金鑰庫落地）——絕不可提交 ---
+.env
+.env.local
+.env.*.local
+*.pem
+*.key
+token.json
+credentials.json
+
+# --- OS／編輯器 ---
+.DS_Store
+Thumbs.db
+.idea/
