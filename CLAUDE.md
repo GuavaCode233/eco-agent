@@ -71,7 +71,7 @@ eco-agent/
 |---|------|------|------|
 | 0.1 | `internal/config` | §4.4.4 所有參數以**常數**定義，標 `// TODO(backend): 由 5.2 集中配置服務下發`；提供 `Config` struct 與 `Load()`，現回傳常數、預留改 HTTP 拉取 | ✅ |
 | 0.2 | `internal/queue` | SQLite 持久化佇列，介面至少含 `Enqueue`／`PeekBatch(n)`／`MarkUploaded(ids)`／`OldestAge()`／`Count()`；每筆帶**唯一事件 ID**（`id_token + 日期 + 路徑類型` 組穩定鍵）供後端冪等去重 | ✅ |
-| 0.3 | `internal/enroll` | 提供 `IDToken()`／`AccessToken()` 等介面，現**回傳 mock 常數**（§7），照金鑰庫抽象預留真實實作 | ⬜ |
+| 0.3 | `internal/enroll` | 提供 `IDToken()`／`AccessToken()` 等介面，現**回傳 mock 常數**（§7），照金鑰庫抽象預留真實實作 | ✅ |
 | 0.4 | `internal/uploader` | 實作**四重觸發**與 at-least-once（詳 §3），上傳函式先打 mock 端點（§7） | ⬜ |
 | 0.V | 獨立驗證 | 手動 `Enqueue` 幾筆假資料，觀察四種觸發各自正確 flush、mock 端點收到、佇列僅在「200」後清除 | ⬜ |
 
