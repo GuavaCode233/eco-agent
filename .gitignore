@@ -8,6 +8,9 @@
 *.so
 *.dylib
 
+# --- Graphify 圖檔 ---
+graphify-out/
+
 # --- 測試與覆蓋率 ---
 *.test
 *.out

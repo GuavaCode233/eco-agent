@@ -2,9 +2,9 @@
 
 > 本檔是給 Claude Code 的**單一任務脈絡**。目標：從零建立 **Eco-Sensing 專案的 Desktop Agent（代號 Eco-Agent）** 骨架。
 > **本檔已內嵌 Eco-Agent 所需的全部規格（參數、觸發邏輯、payload、換算式、開發步驟），可自足執行，無需另讀其他文件即可完成任務。**
-> 完整專案脈絡與各項設計的決策依據（「為什麼這樣選」）見背景參考文件 `docs/Eco-Sensing_專案context文件_v12.md` 第 4.4 節（數位能耗監測 Desktop Agent）。若本檔與 v12 語意衝突，以 v12 為準。
+> 完整專案脈絡與各項設計的決策依據（「為什麼這樣選」）見背景參考文件 `docs/Eco-Sensing_專案context文件_v13.md` 第 4.4 節（數位能耗監測 Desktop Agent）。若本檔與 v13 語意衝突，以 v13 為準。
 >
-> **建議放置位置**：本檔放 `eco-agent/CLAUDE.md`（專案根目錄，Claude Code 啟動時自動讀取為常駐脈絡）；v12 背景文件放 `eco-agent/docs/` 供人回溯，不作為 Claude Code 主脈絡。兩者皆納入版控（勿被 `.gitignore` 忽略），供組員共享。`§2` 開發步驟表的「狀態」欄請隨進度更新。
+> **建議放置位置**：本檔放 `eco-agent/CLAUDE.md`（專案根目錄，Claude Code 啟動時自動讀取為常駐脈絡）；v13 背景文件放 `eco-agent/docs/` 供人回溯，不作為 Claude Code 主脈絡。兩者皆納入版控（勿被 `.gitignore` 忽略），供組員共享。`§2` 開發步驟表的「狀態」欄請隨進度更新。
 
 
 ---
@@ -59,7 +59,7 @@ eco-agent/
 | 步驟 | 內容 | 產出協定 | 觸發模式 | 狀態 |
 |------|------|----------|----------|------|
 | Step 0 | 地基：本機持久化佇列 + 配置常數 + 綁定 mock + 上傳骨架（四重觸發） | — | — | ✅ |
-| Step 1 | 路徑 A：電腦使用（狀態值輪詢，短區間） | MQTT（mock 送出） | 固定區間輪詢 | ⬜ |
+| Step 1 | 路徑 A：電腦使用（狀態值輪詢，短區間，active/idle 兩態，使用率加權、後端計算） | MQTT（mock 送出） | 固定區間輪詢 | ⬜ |
 | Step 2 | 路徑 C：雲端儲存（狀態值輪詢，長區間，真串 Google Drive） | HTTPS（mock 送出） | 持久化時間戳到期判斷 | ⬜ |
 | Step 3 | 路徑 B：印表機（僅個人專屬機 SNMP 輪詢歸戶） | MQTT（mock 送出） | 持久化時間戳到期判斷 | ⬜ |
 
@@ -75,14 +75,19 @@ eco-agent/
 | 0.4 | `internal/uploader` | 實作**四重觸發**與 at-least-once（詳 §3），上傳函式先打 mock 端點（§7） | ✅ |
 | 0.V | 獨立驗證 | 手動 `Enqueue` 幾筆假資料，觀察四種觸發各自正確 flush、mock 端點收到、佇列僅在「200」後清除 | ✅ |
 
-### Step 1 — 路徑 A：電腦使用（狀態值輪詢，短區間）
+### Step 1 — 路徑 A：電腦使用（狀態值輪詢，短區間，active/idle 兩態）
+
+> **能耗模型（v13 [D7]）**：棄「活躍時間 × TDP」。Agent **純感測、只送原始量**，能耗由後端以使用率加權模型 `P_idle + 使用率 ×(P_active − P_idle)` 計算。誘因對齊「節能」（歸戶 idle 開機的浪費）而非「少用」。
 
 | # | 子項 | 說明 | 狀態 |
 |---|------|------|------|
 | 1.1 | `internal/platform`（活動偵測） | 封裝 Windows `GetLastInputInfo()` 與 macOS `IOHIDGetModifierLockState()`，回傳「距上次輸入的間隔」；macOS 需 Accessibility 授權，啟動時檢查並給引導訊息 | ⬜ |
-| 1.2 | `internal/sensors/computer` | 每 `computerUsageRecordInterval`（60 秒）輪詢，累計活躍時間，能耗 = 活躍時間 × CPU TDP，`Enqueue` 進佇列；Payload：`date`、`pc_active_hours`、`pc_tdp_w` | ⬜ |
-| 1.3 | 流量量特性 | 關機期間無活躍時間可採，跳過即可、**不需補查** | ⬜ |
-| 1.V | 獨立驗證 | 跑 Agent，閒置/操作電腦，確認佇列筆數隨時間增長、達 `thresholdCount` 或 `maxAge` 觸發上傳 | ⬜ |
+| 1.2 | CPU 使用率（跨平台） | 用 `gopsutil`（`cpu.Percent`）取即時 CPU 使用率，Windows/macOS 一致介面、免特殊權限；併入同一輪詢週期取樣 | ⬜ |
+| 1.3 | `internal/sensors/computer`（active/idle 分態） | 每 `computerUsageRecordInterval`（60 秒）輪詢，依「距上次輸入間隔」是否超過閾值判該區間為 **active／idle**，分別累計時數並記平均 CPU 使用率；**Agent 不算能耗**，只 `Enqueue` 原始量。Payload：`date`、`pc_active_hours`、`pc_idle_hours`、`pc_avg_cpu_util`、`cpu_model`（取代舊 `pc_tdp_w`） | ⬜ |
+| 1.4 | sleep/喚醒處理 | sleep/hibernate/關機時 Agent 被掛起、不計費（本無記錄，其低耗電自然不進帳）；喚醒後以 **wall-clock 時間戳差分**辨識掛起空白（間隔遠大於輪詢區間），該段不計 active/idle | ⬜ |
+| 1.5 | 即時功耗 fallback（預留、不實作） | Intel RAPL／Apple `powermetrics` 更準但需權限、不跨平台、BYOD 多不可行；**結構預留、現階段不實作**，標 `// TODO(backend): 即時功耗覆蓋（RAPL/powermetrics）作為精度增強` | ⬜ |
+| 1.6 | 流量量特性 | 關機期間無時數可採，跳過即可、**不需補查**（不套用路徑 C 的 deadline-check） | ⬜ |
+| 1.V | 獨立驗證 | 跑 Agent，操作/閒置電腦，確認 active/idle 時數分別累計、平均使用率合理、佇列筆數隨時間增長並達 `thresholdCount`／`maxAge` 觸發上傳；模擬睡眠喚醒後時間戳差分正確跳過空白 | ⬜ |
 | 1.M | 合併驗證 | 與 Step 0 佇列/觸發串起端到端跑通 | ⬜ |
 
 ### Step 2 — 路徑 C：雲端儲存（狀態值輪詢，長區間，持久化時間戳觸發）
@@ -101,7 +106,7 @@ eco-agent/
 
 ### Step 3 — 路徑 B：印表機（僅個人專屬機 SNMP 輪詢歸戶）
 
-> 依 v12：路徑 B 歸戶前提已定案。**本階段只做「個人專屬印表機 SNMP 輪詢歸戶」一軌**；共用機的 Print Server Log / Pull Printing API 標「未來實作」不在範圍；手動上傳用紙量屬 App 端、非 Agent 路徑。
+> 依 v13：路徑 B 歸戶前提已定案。**本階段只做「個人專屬印表機 SNMP 輪詢歸戶」一軌**；共用機的 Print Server Log / Pull Printing API 標「未來實作」不在範圍；手動上傳用紙量屬 App 端、非 Agent 路徑。
 
 | # | 子項 | 說明 | 狀態 |
 |---|------|------|------|
@@ -129,7 +134,7 @@ eco-agent/
 - 佇列資料**僅在後端回 200 才標記已上傳並清除**；失敗（離線/後端不可用）則保留，搭下次觸發重送。
 - 每筆帶**唯一事件 ID**，供後端 upsert/冪等去重，重複送達不重複計算。
 
-**重試策略（照 v12 §4.4.4 定案）**
+**重試策略（照 v13 §4.4.4 定案）**
 - **不設獨立重試計時器**：失敗資料留佇列，搭下次正常觸發重送。
 - **不設最大重試次數上限**：送不出即保留至成功（佇列膨脹由 `maxAge` 與離線期間無新資料自然封頂）。
 - **不採指數退避**：重試節奏跟隨既有稀疏觸發（最密 `checkInterval` 60 秒），無密集重試迴圈。
@@ -142,7 +147,7 @@ eco-agent/
 
 ## 4. 集中配置參數（§4.4.4，現以常數實作，預留後端下發）
 
-> **同步提醒**：下表數值複製自 v12 §4.4.4，屬複製關係。v12 若改動任一值，本表須一併同步。
+> **同步提醒**：下表數值複製自 v13 §4.4.4，屬複製關係。v13 若改動任一值，本表須一併同步。
 
 在 `internal/config` 以常數定義下列值，每個都標 `// TODO(backend): 由 5.2 集中配置服務（sensor_config）下發`：
 
@@ -169,7 +174,7 @@ eco-agent/
 - `internal/enroll` **不實作真正的索取 binding_code / 掃碼 / 換 token 流程**，改提供 mock：
   - `IDToken()` 回傳一個固定的 mock 員工 ID Token 常數（標 §7）。
   - `AccessToken()` / `RefreshToken()` 回傳 mock 常數；金鑰庫存取介面照真實抽象寫（`platform.Keychain`），現在讀寫 mock 值。
-- **預留串接空間**：把「索取 binding_code → 顯示 QR（custom scheme URI，見 v12 §4.5）→ 等 App 掃碼 → 後端發雙 token → 存金鑰庫」整條流程寫成一個帶 `// TODO(backend)` 的 stub 函式與註解，日後後端就緒即可填。
+- **預留串接空間**：把「索取 binding_code → 顯示 QR（custom scheme URI，見 v13 §4.5）→ 等 App 掃碼 → 後端發雙 token → 存金鑰庫」整條流程寫成一個帶 `// TODO(backend)` 的 stub 函式與註解，日後後端就緒即可填。
 - 綁定的完整規格（BINDING_CODE 表、5 分鐘 TTL、consumed/expired、防重放、雙 token、撤銷）**寫進註解**供日後實作對照，不在本階段落地後端側。
 
 ---
@@ -204,7 +209,7 @@ eco-agent/
 1. `go build` 三平台交叉編譯皆過（至少 Windows/macOS）。
 2. 每條路徑各有：獨立 demo 跑法 + 單元測試 + 「如何獨立驗證」說明。
 3. 端到端 demo：三路徑齊跑 → 佇列匯集 → 四重觸發上傳到 mock 端點。
-4. 專測兜底路徑（照 v12 測試原則）：
+4. 專測兜底路徑（照 v13 測試原則）：
    - 關機前 hook 搶送零頭；
    - 開機後補送未送完資料；
    - 路徑 C/B 到期判斷觸發（含冷啟動視為已到期、關機數日後開機補查）；
