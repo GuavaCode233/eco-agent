@@ -59,7 +59,7 @@ eco-agent/
 | 步驟 | 內容 | 產出協定 | 觸發模式 | 狀態 |
 |------|------|----------|----------|------|
 | Step 0 | 地基：本機持久化佇列 + 配置常數 + 綁定 mock + 上傳骨架（四重觸發） | — | — | ✅ |
-| Step 1 | 路徑 A：電腦使用（狀態值輪詢，短區間，active/idle 兩態，使用率加權、後端計算） | MQTT（mock 送出） | 固定區間輪詢 | 🟡 |
+| Step 1 | 路徑 A：電腦使用（狀態值輪詢，短區間，active/idle 兩態，使用率加權、後端計算） | MQTT（mock 送出） | 固定區間輪詢 | ✅ |
 | Step 2 | 路徑 C：雲端儲存（狀態值輪詢，長區間，真串 Google Drive） | HTTPS（mock 送出） | 持久化時間戳到期判斷 | ⬜ |
 | Step 3 | 路徑 B：印表機（僅個人專屬機 SNMP 輪詢歸戶） | MQTT（mock 送出） | 持久化時間戳到期判斷 | ⬜ |
 
@@ -84,11 +84,11 @@ eco-agent/
 | 1.1 | `internal/platform`（活動偵測） | 封裝 Windows `GetLastInputInfo()` 與 macOS `IOHIDGetModifierLockState()`，回傳「距上次輸入的間隔」；macOS 需 Accessibility 授權，啟動時檢查並給引導訊息 | ✅ |
 | 1.2 | CPU 使用率（跨平台） | 用 `gopsutil`（`cpu.Percent`）取即時 CPU 使用率，Windows/macOS 一致介面、免特殊權限；併入同一輪詢週期取樣 | ✅ |
 | 1.3 | `internal/sensors/computer`（active/idle 分態） | 每 `computerUsageRecordInterval`（60 秒）輪詢，依「距上次輸入間隔」是否超過閾值判該區間為 **active／idle**，分別累計時數並記平均 CPU 使用率；**Agent 不算能耗**，只 `Enqueue` 原始量。Payload：`date`、`pc_active_hours`、`pc_idle_hours`、`pc_avg_cpu_util`、`cpu_model`（取代舊 `pc_tdp_w`） | ✅ |
-| 1.4 | sleep/喚醒處理 | sleep/hibernate/關機時 Agent 被掛起、不計費（本無記錄，其低耗電自然不進帳）；喚醒後以 **wall-clock 時間戳差分**辨識掛起空白（間隔遠大於輪詢區間），該段不計 active/idle | ⬜ |
-| 1.5 | 即時功耗 fallback（預留、不實作） | Intel RAPL／Apple `powermetrics` 更準但需權限、不跨平台、BYOD 多不可行；**結構預留、現階段不實作**，標 `// TODO(backend): 即時功耗覆蓋（RAPL/powermetrics）作為精度增強` | ⬜ |
-| 1.6 | 流量量特性 | 關機期間無時數可採，跳過即可、**不需補查**（不套用路徑 C 的 deadline-check） | ⬜ |
-| 1.V | 獨立驗證 | 跑 Agent，操作/閒置電腦，確認 active/idle 時數分別累計、平均使用率合理、佇列筆數隨時間增長並達 `thresholdCount`／`maxAge` 觸發上傳；模擬睡眠喚醒後時間戳差分正確跳過空白 | ⬜ |
-| 1.M | 合併驗證 | 與 Step 0 佇列/觸發串起端到端跑通 | ⬜ |
+| 1.4 | sleep/喚醒處理 | sleep/hibernate/關機時 Agent 被掛起、不計費（本無記錄，其低耗電自然不進帳）；喚醒後以 **wall-clock 時間戳差分**辨識掛起空白（間隔遠大於輪詢區間），該段不計 active/idle | ✅ |
+| 1.5 | 即時功耗 fallback（預留、不實作） | Intel RAPL／Apple `powermetrics` 更準但需權限、不跨平台、BYOD 多不可行；**結構預留、現階段不實作**，標 `// TODO(backend): 即時功耗覆蓋（RAPL/powermetrics）作為精度增強` | ✅ |
+| 1.6 | 流量量特性 | 關機期間無時數可採，跳過即可、**不需補查**（不套用路徑 C 的 deadline-check） | ✅ |
+| 1.V | 獨立驗證 | 跑 Agent，操作/閒置電腦，確認 active/idle 時數分別累計、平均使用率合理、佇列筆數隨時間增長並達 `thresholdCount`／`maxAge` 觸發上傳；模擬睡眠喚醒後時間戳差分正確跳過空白 | ✅ |
+| 1.M | 合併驗證 | 與 Step 0 佇列/觸發串起端到端跑通 | ✅ |
 
 ### Step 2 — 路徑 C：雲端儲存（狀態值輪詢，長區間，持久化時間戳觸發）
 

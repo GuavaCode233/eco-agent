@@ -171,27 +171,141 @@ func TestRestartRestore(t *testing.T) {
 	}
 }
 
-// TestDateRollover：跨午夜切換日期，產生兩筆各自累計的事件。
+// TestDateRollover：每區間連續輪詢跨過午夜（gap 僅一個區間、非掛起），產生兩筆各自累計
+// 的事件。跨日與「相隔一整天無輪詢＝掛起」不同：後者由 suspend 偵測攔截（見
+// TestSuspendGapExcluded），此處驗證的是正常連續運轉下的日界切換。
 func TestDateRollover(t *testing.T) {
 	ctx := context.Background()
 	q := newTestQueue(t)
 	act := &fakeActivity{idle: time.Second}
 	cpu := &fakeCPU{pct: 10}
+	interval := 60 * time.Second
+	clk := newStepClock("2026-07-17 23:59:30") // 午夜前 30 秒
 
-	day := "2026-07-17"
-	nowFn := func() time.Time {
-		ts, _ := time.Parse("2006-01-02", day)
-		return ts
-	}
-	s := New(q, fakeEnroll{testToken}, act, cpu, 60*time.Second, WithNow(nowFn))
+	s := New(q, fakeEnroll{testToken}, act, cpu, interval, WithNow(clk.now))
 
-	s.pollOnce(ctx) // 第一天
-	day = "2026-07-18"
-	s.pollOnce(ctx) // 第二天
+	s.pollOnce(ctx) // 2026-07-17 23:59:30 → 第一天
+	clk.add(interval)
+	s.pollOnce(ctx) // 2026-07-18 00:00:30 → 第二天（gap=60s，非掛起）
 
 	n, _ := q.Count(ctx)
 	if n != 2 {
 		t.Fatalf("queue count = %d; want 2 (one per day)", n)
+	}
+}
+
+// fakePower 是可控的即時功耗量測（Step 1.5 seam 測試用）。
+type fakePower struct {
+	watts     float64
+	supported bool
+}
+
+func (f fakePower) Available() error {
+	if !f.supported {
+		return context.Canceled // 任意非 nil 錯誤，模擬不支援
+	}
+	return nil
+}
+func (f fakePower) PowerWatts() (float64, bool, error) { return f.watts, f.supported, nil }
+
+// TestPowerOverlayDefaultOmitted：預設不支援即時功耗，payload 不含 pc_power_w（回退加權模型）。
+func TestPowerOverlayDefaultOmitted(t *testing.T) {
+	ctx := context.Background()
+	q := newTestQueue(t)
+	s := New(q, fakeEnroll{testToken}, &fakeActivity{idle: time.Second}, &fakeCPU{pct: 30},
+		60*time.Second, WithNow(fixedNow("2026-07-17")))
+	s.pollOnce(ctx)
+
+	id := queue.EventID(testToken, "2026-07-17", queue.PathComputer)
+	e, _, _ := q.Get(ctx, id)
+	if _, present := e.Payload["pc_power_w"]; present {
+		t.Fatalf("pc_power_w present with unsupported power sampler; want omitted")
+	}
+}
+
+// TestPowerOverlaySeam：注入「支援」的功耗量測時，seam 正確把 pc_power_w 附入 payload。
+// 驗證 Step 1.5 的結構接點可用（平台實作就緒後即插即用），現階段預設仍不啟用。
+func TestPowerOverlaySeam(t *testing.T) {
+	ctx := context.Background()
+	q := newTestQueue(t)
+	s := New(q, fakeEnroll{testToken}, &fakeActivity{idle: time.Second}, &fakeCPU{pct: 30},
+		60*time.Second, WithNow(fixedNow("2026-07-17")),
+		WithPowerSampler(fakePower{watts: 42.5, supported: true}))
+	s.pollOnce(ctx)
+
+	id := queue.EventID(testToken, "2026-07-17", queue.PathComputer)
+	e, _, _ := q.Get(ctx, id)
+	got, present := e.Payload["pc_power_w"]
+	if !present {
+		t.Fatalf("pc_power_w absent with supported power sampler; want present")
+	}
+	if got.(float64) != 42.5 {
+		t.Fatalf("pc_power_w = %v; want 42.5", got)
+	}
+}
+
+// stepClock 是可推進的假時鐘（回傳無 monotonic 讀數的牆鐘時間），供 sleep/喚醒測試。
+type stepClock struct{ t time.Time }
+
+func newStepClock(base string) *stepClock {
+	ts, _ := time.Parse("2006-01-02 15:04:05", base)
+	return &stepClock{t: ts}
+}
+func (c *stepClock) now() time.Time      { return c.t }
+func (c *stepClock) add(d time.Duration) { c.t = c.t.Add(d) }
+
+// TestSuspendGapExcluded：牆鐘跳躍超過門檻（模擬 sleep/hibernate）時，該段不計 active/idle。
+func TestSuspendGapExcluded(t *testing.T) {
+	ctx := context.Background()
+	q := newTestQueue(t)
+	act := &fakeActivity{idle: time.Second} // 皆 active
+	cpu := &fakeCPU{pct: 50}
+	interval := 60 * time.Second
+	clk := newStepClock("2026-07-17 09:00:00")
+
+	s := New(q, fakeEnroll{testToken}, act, cpu, interval,
+		WithNow(clk.now), WithSuspendGapThreshold(3*interval))
+
+	// 兩個正常區間。
+	s.pollOnce(ctx)
+	clk.add(interval)
+	s.pollOnce(ctx)
+	afterTwo := s.acc.activeHours
+
+	// 模擬 sleep 8 小時（牆鐘跳躍 >> 門檻）。
+	clk.add(8 * time.Hour)
+	s.pollOnce(ctx) // 應偵測掛起、整段跳過，不累計
+
+	if s.acc.activeHours != afterTwo {
+		t.Fatalf("active hours changed across suspend: %v -> %v; want unchanged", afterTwo, s.acc.activeHours)
+	}
+	// 掛起後恢復正常：再一個區間應正常累計。
+	clk.add(interval)
+	s.pollOnce(ctx)
+	if got, want := round6(s.acc.activeHours), round6(afterTwo+interval.Hours()); got != want {
+		t.Fatalf("post-resume active hours = %v; want %v (normal accounting resumed)", got, want)
+	}
+}
+
+// TestSubThresholdGapCountsNormally：小於門檻的延遲（排程抖動）仍以名目區間計時。
+func TestSubThresholdGapCountsNormally(t *testing.T) {
+	ctx := context.Background()
+	q := newTestQueue(t)
+	act := &fakeActivity{idle: time.Second}
+	cpu := &fakeCPU{pct: 50}
+	interval := 60 * time.Second
+	clk := newStepClock("2026-07-17 09:00:00")
+
+	s := New(q, fakeEnroll{testToken}, act, cpu, interval,
+		WithNow(clk.now), WithSuspendGapThreshold(3*interval))
+
+	s.pollOnce(ctx)
+	clk.add(2 * interval) // 延遲但 < 3×門檻
+	s.pollOnce(ctx)
+
+	// 兩次輪詢皆應計一個名目區間（不因 gap=2×interval 而多攤，也不誤判掛起）。
+	if got, want := round6(s.acc.activeHours), round6(2*interval.Hours()); got != want {
+		t.Fatalf("active hours = %v; want %v (nominal interval per poll)", got, want)
 	}
 }
 
