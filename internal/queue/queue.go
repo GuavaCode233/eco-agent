@@ -13,6 +13,7 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"strings"
 	"time"
@@ -39,7 +40,7 @@ type Event struct {
 	// PathType 為來源路徑。
 	PathType PathType
 	// Payload 為去識別化後的資料欄位（僅含 ID Token 與量值，不含姓名/Email）。
-	// 例：路徑 A {"date":..., "pc_active_hours":..., "pc_tdp_w":...}。
+	// 例：路徑 A {"date":..., "pc_active_hours":..., "pc_idle_hours":..., "pc_avg_cpu_util":..., "cpu_model":...}。
 	Payload map[string]any
 	// CreatedAt 為佇列首次寫入該事件的時間；同 ID 再次 Enqueue 不會更新此值，
 	// 使 OldestAge（maxAge 保底觸發）反映「資料在佇列滯留多久」而非最後更新時間。
@@ -172,6 +173,34 @@ LIMIT ?`
 		return nil, fmt.Errorf("queue: peek rows: %w", err)
 	}
 	return events, nil
+}
+
+// Get 讀取指定事件 ID 的單筆事件。不存在時回 (Event{}, false, nil)。
+//
+// 供路徑 A（sensors/computer）重啟後回填「當日累計」使用：Agent 以「一天一筆累計事件」
+// 的狀態值輪詢模型運作，事件 ID 為 idToken+日期+路徑；重啟時記憶體累計已失，若當日事件
+// 仍在佇列（尚未上傳清除），先讀回作為累計基準，避免下次 upsert 以較小值覆蓋。
+func (q *Queue) Get(ctx context.Context, id string) (Event, bool, error) {
+	const query = `SELECT id, path_type, payload, created_at FROM events WHERE id = ?`
+	var (
+		e         Event
+		pathType  string
+		payload   string
+		createdAt int64
+	)
+	err := q.db.QueryRowContext(ctx, query, id).Scan(&e.ID, &pathType, &payload, &createdAt)
+	if errors.Is(err, sql.ErrNoRows) {
+		return Event{}, false, nil
+	}
+	if err != nil {
+		return Event{}, false, fmt.Errorf("queue: get %s: %w", id, err)
+	}
+	e.PathType = PathType(pathType)
+	e.CreatedAt = time.Unix(0, createdAt)
+	if err := json.Unmarshal([]byte(payload), &e.Payload); err != nil {
+		return Event{}, false, fmt.Errorf("queue: get unmarshal %s: %w", id, err)
+	}
+	return e, true, nil
 }
 
 // MarkUploaded 於後端回 200 後，將指定事件自佇列清除（at-least-once：僅 200 才清）。
