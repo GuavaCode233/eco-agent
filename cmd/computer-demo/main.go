@@ -33,7 +33,7 @@ import (
 
 const (
 	demoInterval      = 2 * time.Second  // 縮短輪詢區間（正式 60s）
-	demoIdleThreshold = 5 * time.Second  // 縮短 idle 閾值（正式 5min）
+	demoIdleThreshold = 5 * time.Second  // 縮短 idle 閾值（正式 10min）
 	demoDuration      = 40 * time.Second // demo 總時長
 )
 

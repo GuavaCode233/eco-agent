@@ -27,7 +27,7 @@ import (
 //
 // TODO(backend): idle 閾值日後併入 5.2 集中配置服務（sensor_config）下發；現為本機預設，
 // 可經 WithIdleThreshold 覆寫（測試／demo 用小值）。
-const DefaultIdleThreshold = 5 * time.Minute
+const DefaultIdleThreshold = 10 * time.Minute
 
 // idTokenProvider 抽象「取員工 ID Token」，由 *enroll.Enroller 滿足。
 // 以介面注入便於測試，且維持路徑 A 對 enroll 的最小依賴面。
