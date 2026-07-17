@@ -59,7 +59,7 @@ eco-agent/
 | 步驟 | 內容 | 產出協定 | 觸發模式 | 狀態 |
 |------|------|----------|----------|------|
 | Step 0 | 地基：本機持久化佇列 + 配置常數 + 綁定 mock + 上傳骨架（四重觸發） | — | — | ✅ |
-| Step 1 | 路徑 A：電腦使用（狀態值輪詢，短區間，active/idle 兩態，使用率加權、後端計算） | MQTT（mock 送出） | 固定區間輪詢 | ⬜ |
+| Step 1 | 路徑 A：電腦使用（狀態值輪詢，短區間，active/idle 兩態，使用率加權、後端計算） | MQTT（mock 送出） | 固定區間輪詢 | 🟡 |
 | Step 2 | 路徑 C：雲端儲存（狀態值輪詢，長區間，真串 Google Drive） | HTTPS（mock 送出） | 持久化時間戳到期判斷 | ⬜ |
 | Step 3 | 路徑 B：印表機（僅個人專屬機 SNMP 輪詢歸戶） | MQTT（mock 送出） | 持久化時間戳到期判斷 | ⬜ |
 
@@ -81,7 +81,7 @@ eco-agent/
 
 | # | 子項 | 說明 | 狀態 |
 |---|------|------|------|
-| 1.1 | `internal/platform`（活動偵測） | 封裝 Windows `GetLastInputInfo()` 與 macOS `IOHIDGetModifierLockState()`，回傳「距上次輸入的間隔」；macOS 需 Accessibility 授權，啟動時檢查並給引導訊息 | ⬜ |
+| 1.1 | `internal/platform`（活動偵測） | 封裝 Windows `GetLastInputInfo()` 與 macOS `IOHIDGetModifierLockState()`，回傳「距上次輸入的間隔」；macOS 需 Accessibility 授權，啟動時檢查並給引導訊息 | ✅ |
 | 1.2 | CPU 使用率（跨平台） | 用 `gopsutil`（`cpu.Percent`）取即時 CPU 使用率，Windows/macOS 一致介面、免特殊權限；併入同一輪詢週期取樣 | ⬜ |
 | 1.3 | `internal/sensors/computer`（active/idle 分態） | 每 `computerUsageRecordInterval`（60 秒）輪詢，依「距上次輸入間隔」是否超過閾值判該區間為 **active／idle**，分別累計時數並記平均 CPU 使用率；**Agent 不算能耗**，只 `Enqueue` 原始量。Payload：`date`、`pc_active_hours`、`pc_idle_hours`、`pc_avg_cpu_util`、`cpu_model`（取代舊 `pc_tdp_w`） | ⬜ |
 | 1.4 | sleep/喚醒處理 | sleep/hibernate/關機時 Agent 被掛起、不計費（本無記錄，其低耗電自然不進帳）；喚醒後以 **wall-clock 時間戳差分**辨識掛起空白（間隔遠大於輪詢區間），該段不計 active/idle | ⬜ |
@@ -228,3 +228,13 @@ eco-agent/
 - Refresh Token 走金鑰庫抽象，**不寫純文字檔**（即使現在是 mock 值）。
 - 佇列**只在 200 後清除**；at-least-once 不可打折。
 - 開發順序**嚴格 A → C → B**，每步可獨立/合併測試。
+
+## graphify
+
+This project has a knowledge graph at graphify-out/ with god nodes, community structure, and cross-file relationships.
+
+Rules:
+- For codebase questions, first run `graphify query "<question>"` when graphify-out/graph.json exists. Use `graphify path "<A>" "<B>"` for relationships and `graphify explain "<concept>"` for focused concepts. These return a scoped subgraph, usually much smaller than GRAPH_REPORT.md or raw grep output.
+- If graphify-out/wiki/index.md exists, use it for broad navigation instead of raw source browsing.
+- Read graphify-out/GRAPH_REPORT.md only for broad architecture review or when query/path/explain do not surface enough context.
+- After modifying code, run `graphify update .` to keep the graph current (AST-only, no API cost).
