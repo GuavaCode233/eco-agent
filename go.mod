@@ -4,6 +4,7 @@ go 1.26.4
 
 require (
 	github.com/shirou/gopsutil/v4 v4.26.6
+	golang.org/x/oauth2 v0.36.0
 	golang.org/x/sys v0.46.0
 	modernc.org/sqlite v1.54.0
 )

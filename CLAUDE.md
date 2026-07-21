@@ -60,7 +60,7 @@ eco-agent/
 |------|------|----------|----------|------|
 | Step 0 | 地基：本機持久化佇列 + 配置常數 + 綁定 mock + 上傳骨架（四重觸發） | — | — | ✅ |
 | Step 1 | 路徑 A：電腦使用（狀態值輪詢，短區間，active/idle 兩態，使用率加權、後端計算） | MQTT（mock 送出） | 固定區間輪詢 | ✅ |
-| Step 2 | 路徑 C：雲端儲存（狀態值輪詢，長區間，真串 Google Drive） | HTTPS（mock 送出） | 持久化時間戳到期判斷 | ⬜ |
+| Step 2 | 路徑 C：雲端儲存（狀態值輪詢，長區間，真串 Google Drive） | HTTPS（mock 送出） | 持久化時間戳到期判斷 | 🟡 |
 | Step 3 | 路徑 B：印表機（僅個人專屬機 SNMP 輪詢歸戶） | MQTT（mock 送出） | 持久化時間戳到期判斷 | ⬜ |
 
 ### Step 0 — 地基（佇列 + 配置 + 上傳骨架）
@@ -96,7 +96,7 @@ eco-agent/
 
 | # | 子項 | 說明 | 狀態 |
 |---|------|------|------|
-| 2.1 | `internal/sensors/drive`（真串 API） | **真串 Google Drive API v3**，`about?fields=storageQuota` 取用量；OAuth 憑證位置見 §6 | ⬜ |
+| 2.1 | `internal/sensors/drive`（真串 API） | **真串 Google Drive API v3**，`about?fields=storageQuota` 取用量；OAuth 憑證位置見 §6 | ✅ |
 | 2.2 | 觸發模型（時間戳） | 不用絕對計時器；用**持久化時間戳 `lastDriveQuotaCheckAt`**（與佇列同一份 SQLite/落磁碟）；**掛 `checkInterval`（60 秒巡檢）**，判斷 `now() - lastDriveQuotaCheckAt >= driveQuotaInterval`（24h）才查、`Enqueue`、更新時間戳。掛巡檢而非 `computerUsageRecordInterval`（職責分離） | ⬜ |
 | 2.3 | 冷啟動 | 時間戳不存在視為「已到期」（0/null），第一次巡檢即查並寫入時間戳 | ⬜ |
 | 2.4 | 開機補查 | 關機數日後開機，若距上次查詢已超過 `driveQuotaInterval`，開機後首次巡檢自動補查——與「開機後檢查」合流，**無需另寫** | ⬜ |

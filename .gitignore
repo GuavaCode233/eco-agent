@@ -31,6 +31,8 @@ coverage.*
 *.key
 token.json
 credentials.json
+google_oauth_token.json
+*_oauth_token.json
 
 # --- OS／編輯器 ---
 .DS_Store
