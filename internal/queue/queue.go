@@ -95,11 +95,47 @@ CREATE TABLE IF NOT EXISTS events (
 	created_at INTEGER NOT NULL,          -- 首次入列時間（UnixNano）
 	updated_at INTEGER NOT NULL           -- 最後更新時間（UnixNano）
 );
-CREATE INDEX IF NOT EXISTS idx_events_created_at ON events(created_at);`
+CREATE INDEX IF NOT EXISTS idx_events_created_at ON events(created_at);
+CREATE TABLE IF NOT EXISTS state (
+	key   TEXT PRIMARY KEY,          -- 感測器跨重啟持久化狀態鍵（如 lastDriveQuotaCheckAt）
+	value TEXT NOT NULL
+);`
 	if _, err := q.db.ExecContext(ctx, schema); err != nil {
 		return fmt.Errorf("queue: init schema: %w", err)
 	}
 	return nil
+}
+
+// SetState 寫入一組持久化鍵值，與事件同一份 SQLite 落磁碟（跨重啟保留）。
+//
+// 供狀態值長輪詢路徑保存「上次查詢時間戳」——路徑 C 的 lastDriveQuotaCheckAt、
+// 路徑 B 的 lastPrinterPollAt（§4.4 觸發模型：以持久化時間戳＋checkInterval 到期判斷，
+// 不用 sleep 絕對計時器）。value 由呼叫端自行編碼（例：RFC3339Nano 時間字串）。
+func (q *Queue) SetState(ctx context.Context, key, value string) error {
+	if key == "" {
+		return fmt.Errorf("queue: set state: empty key")
+	}
+	const stmt = `
+INSERT INTO state (key, value) VALUES (?, ?)
+ON CONFLICT(key) DO UPDATE SET value = excluded.value`
+	if _, err := q.db.ExecContext(ctx, stmt, key, value); err != nil {
+		return fmt.Errorf("queue: set state %q: %w", key, err)
+	}
+	return nil
+}
+
+// GetState 讀取持久化鍵值。鍵不存在回 ("", false, nil)——供冷啟動判斷（§2 Step 2.3：
+// 時間戳不存在視為「已到期」）。
+func (q *Queue) GetState(ctx context.Context, key string) (string, bool, error) {
+	var value string
+	err := q.db.QueryRowContext(ctx, "SELECT value FROM state WHERE key = ?", key).Scan(&value)
+	if errors.Is(err, sql.ErrNoRows) {
+		return "", false, nil
+	}
+	if err != nil {
+		return "", false, fmt.Errorf("queue: get state %q: %w", key, err)
+	}
+	return value, true, nil
 }
 
 // Close 關閉底層資料庫。

@@ -97,11 +97,11 @@ eco-agent/
 | # | 子項 | 說明 | 狀態 |
 |---|------|------|------|
 | 2.1 | `internal/sensors/drive`（真串 API） | **真串 Google Drive API v3**，`about?fields=storageQuota` 取用量；OAuth 憑證位置見 §6 | ✅ |
-| 2.2 | 觸發模型（時間戳） | 不用絕對計時器；用**持久化時間戳 `lastDriveQuotaCheckAt`**（與佇列同一份 SQLite/落磁碟）；**掛 `checkInterval`（60 秒巡檢）**，判斷 `now() - lastDriveQuotaCheckAt >= driveQuotaInterval`（24h）才查、`Enqueue`、更新時間戳。掛巡檢而非 `computerUsageRecordInterval`（職責分離） | ⬜ |
-| 2.3 | 冷啟動 | 時間戳不存在視為「已到期」（0/null），第一次巡檢即查並寫入時間戳 | ⬜ |
-| 2.4 | 開機補查 | 關機數日後開機，若距上次查詢已超過 `driveQuotaInterval`，開機後首次巡檢自動補查——與「開機後檢查」合流，**無需另寫** | ⬜ |
-| 2.5 | 能耗換算與送出 | 能耗 = 儲存量(GB) × PUE × 電力係數；Payload：`date`、`drive_usage_gb`；走 HTTPS（現 mock 送出） | ⬜ |
-| 2.V | 獨立驗證 | `driveQuotaInterval` 縮到 1–2 分，觀察到期即查；改時間戳為很久以前 → 下次巡檢立即補查；清時間戳模擬冷啟動第一次即查 | ⬜ |
+| 2.2 | 觸發模型（時間戳） | 不用絕對計時器；用**持久化時間戳 `lastDriveQuotaCheckAt`**（與佇列同一份 SQLite/落磁碟，見 `queue.SetState/GetState`）；**掛 `checkInterval`（60 秒巡檢）**，判斷 `now() - lastDriveQuotaCheckAt >= driveQuotaInterval`（24h）才查、`Enqueue`、更新時間戳。掛巡檢而非 `computerUsageRecordInterval`（職責分離）。查詢／入列失敗不更新時間戳，下次巡檢自然重試 | ✅ |
+| 2.3 | 冷啟動 | 時間戳不存在（`GetState` ok=false）或無法解析視為「已到期」，第一次巡檢即查並寫入時間戳 | ✅ |
+| 2.4 | 開機補查 | 關機數日後開機，若距上次查詢已超過 `driveQuotaInterval`，開機後首次巡檢自動補查——與「開機後檢查」合流（`Run` 啟動先立即巡檢一次），**無需另寫** | ✅ |
+| 2.5 | 能耗換算與送出 | Agent 純感測、只送原始量（比照路徑 A）：Payload `{date, drive_usage_gb}`（= `storageQuota.usage` 換算 GB），能耗（儲存量GB × PUE × 電力係數）由後端計算；走 HTTPS（協定分流由 uploader 處理，現 mock 送出） | ✅ |
+| 2.V | 獨立驗證 | `cmd/drive-sensor-demo`：縮短 `driveQuotaInterval` 觀察到期即查；預置很久以前時間戳 → 啟動即補查；冷啟動（無時間戳）第一次即查 | ✅ |
 | 2.M | 合併驗證 | A + C 同跑，各自節奏、共用同一佇列與上傳觸發 | ⬜ |
 
 ### Step 3 — 路徑 B：印表機（僅個人專屬機 SNMP 輪詢歸戶）
