@@ -100,7 +100,7 @@ eco-agent/
 | 2.2 | 觸發模型（時間戳） | 不用絕對計時器；用**持久化時間戳 `lastDriveQuotaCheckAt`**（與佇列同一份 SQLite/落磁碟，見 `queue.SetState/GetState`）；**掛 `checkInterval`（60 秒巡檢）**，判斷 `now() - lastDriveQuotaCheckAt >= driveQuotaInterval`（24h）才查、`Enqueue`、更新時間戳。掛巡檢而非 `computerUsageRecordInterval`（職責分離）。查詢／入列失敗不更新時間戳，下次巡檢自然重試 | ✅ |
 | 2.3 | 冷啟動 | 時間戳不存在（`GetState` ok=false）或無法解析視為「已到期」，第一次巡檢即查並寫入時間戳 | ✅ |
 | 2.4 | 開機補查 | 關機數日後開機，若距上次查詢已超過 `driveQuotaInterval`，開機後首次巡檢自動補查——與「開機後檢查」合流（`Run` 啟動先立即巡檢一次），**無需另寫** | ✅ |
-| 2.5 | 能耗換算與送出 | Agent 純感測、只送原始量（比照路徑 A）：Payload `{date, drive_usage_gb}`（= `storageQuota.usage` 換算 GB），能耗（儲存量GB × PUE × 電力係數）由後端計算；走 HTTPS（協定分流由 uploader 處理，現 mock 送出） | ✅ |
+| 2.5 | 能耗換算與送出 | Agent 純感測、只送原始量（比照路徑 A）：Payload `{date, drive_usage_gb}`（= `usageInDrive` 換算 GB，v15 [D8]；否決 `usage`／`limit`），能耗（儲存量GB × PUE × 電力係數）由後端計算；走 HTTPS（協定分流由 uploader 處理，現 mock 送出）。`drive_trash_gb`（= `usageInDriveTrash`，減碳激勵任務用）結構已預留但**不啟用**，待組員確認（`enableTrashIncentive=false`，標 TODO(backend)） | ✅ |
 | 2.V | 獨立驗證 | `cmd/drive-sensor-demo`：縮短 `driveQuotaInterval` 觀察到期即查；預置很久以前時間戳 → 啟動即補查；冷啟動（無時間戳）第一次即查 | ✅ |
 | 2.M | 合併驗證 | A + C 同跑，各自節奏、共用同一佇列與上傳觸發 | ⬜ |
 

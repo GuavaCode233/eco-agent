@@ -29,6 +29,13 @@ import (
 // StateKeyLastCheck 為路徑 C 上次查詢時間戳的持久化鍵名（存 queue 的 state KV）。
 const StateKeyLastCheck = "lastDriveQuotaCheckAt"
 
+// enableTrashIncentive 控制是否於 payload 送出 drive_trash_gb（取自 usageInDriveTrash，
+// v15 [D8] 減碳激勵任務用：「可立即釋放的儲存能耗」）。
+//
+// 現為 false：欄位與換算已實作但**不啟用**——待與組員確認切分方式與激勵回饋機制後翻為 true。
+// TODO(backend): 與組員確認後啟用 drive_trash_gb（是否納入 payload、App/儀表板如何呈現與回饋）。
+const enableTrashIncentive = false
+
 // idTokenProvider 抽象「取員工 ID Token」，由 *enroll.Enroller 滿足（與路徑 A 一致）。
 type idTokenProvider interface {
 	IDToken() (string, error)
@@ -161,13 +168,23 @@ func (s *Sensor) enqueue(ctx context.Context, quota Quota) error {
 	}
 	date := s.now().Format("2006-01-02")
 
-	// 純感測、只送原始量：drive_usage_gb 為帳號雲端儲存取用量（storageQuota.usage，
-	// 涵蓋 Drive/Gmail/Photos，代表使用者雲端儲存足跡）；能耗由後端換算。usageInDrive
-	// 可另供後端做 Drive-only 分析，本 payload 依 §2 Step 2.5 僅帶 drive_usage_gb。
+	// 純感測、只送原始量（比照路徑 A）；能耗由後端換算。
+	// drive_usage_gb 取 usageInDrive（v15 [D8]）：僅「我的雲端硬碟」內容佔用。否決 usage
+	// （含 Gmail/Photos，超出路徑 C 的 Drive SVS 範圍）與 limit（配額額度非實際佔用；
+	// Workspace pooled 模式下為機構共享總池、全員雷同無區辨力）。
+	driveUsageGB := round6(quota.UsageInDriveGB())
 	payload := map[string]any{
 		"date":           date,
-		"drive_usage_gb": round6(quota.UsageGB()),
+		"drive_usage_gb": driveUsageGB,
 	}
+
+	// drive_trash_gb 取 usageInDriveTrash，作「可立即釋放的儲存能耗」減碳激勵任務（v15 [D8]）。
+	// usageInDriveTrash 已內含於 usageInDrive，此欄為「其中可釋放部分」的拆分、非額外能耗。
+	// 現階段結構預留、不啟用（見 enableTrashIncentive 常數說明）。
+	if enableTrashIncentive {
+		payload["drive_trash_gb"] = round6(quota.UsageInDriveTrashGB())
+	}
+
 	e := queue.Event{
 		ID:       queue.EventID(idToken, date, queue.PathDrive),
 		PathType: queue.PathDrive,
@@ -177,7 +194,7 @@ func (s *Sensor) enqueue(ctx context.Context, quota Quota) error {
 		return err
 	}
 	s.log.Info("path C enqueued drive usage",
-		"date", date, "drive_usage_gb", round6(quota.UsageGB()))
+		"date", date, "drive_usage_gb", driveUsageGB)
 	return nil
 }
 

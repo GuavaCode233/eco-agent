@@ -42,7 +42,13 @@ type mockSampler struct {
 func (m *mockSampler) StorageQuota(_ context.Context) (drive.Quota, error) {
 	n := m.calls.Add(1)
 	gb := m.baseGB + m.stepGB*float64(n-1)
-	return drive.Quota{Usage: int64(gb * 1e9)}, nil
+	// 能耗歸戶取 usageInDrive（v15 [D8]）；Usage（含 Gmail/Photos）另填較大值僅供對照。
+	// UsageInDriveTrash 為垃圾桶佔用（已內含於 usageInDrive），供未來 drive_trash_gb 激勵任務。
+	return drive.Quota{
+		Usage:             int64(gb * 1.5 * 1e9),
+		UsageInDrive:      int64(gb * 1e9),
+		UsageInDriveTrash: int64(gb * 0.1 * 1e9),
+	}, nil
 }
 
 func main() {

@@ -41,11 +41,17 @@ type Quota struct {
 	Limit int64
 }
 
-// UsageGB 回傳帳號總用量（GB，10^9 位元組）。供 2.5 能耗換算取「儲存量(GB)」。
+// UsageGB 回傳帳號總用量（GB，10^9 位元組）——含 Gmail/Photos。
+// 註：能耗歸戶不採此值（v15 [D8] 否決 usage：超出路徑 C 的 Drive SVS 範圍）；保留供對照/除錯。
 func (q Quota) UsageGB() float64 { return float64(q.Usage) / bytesPerGB }
 
-// UsageInDriveGB 回傳僅 Drive 內容用量（GB）。
+// UsageInDriveGB 回傳僅「我的雲端硬碟」內容用量（GB，含垃圾桶那部分）。
+// 能耗換算的「儲存量」取此值（v15 [D8]）。
 func (q Quota) UsageInDriveGB() float64 { return float64(q.UsageInDrive) / bytesPerGB }
+
+// UsageInDriveTrashGB 回傳 Drive 垃圾桶用量（GB）。已內含於 UsageInDrive，非額外佔用；
+// 供 v15 [D8]「可立即釋放的儲存能耗」減碳激勵任務單獨拆分使用。
+func (q Quota) UsageInDriveTrashGB() float64 { return float64(q.UsageInDriveTrash) / bytesPerGB }
 
 // QuotaSampler 抽象「取 Google Drive 儲存用量」，供路徑 C 感測器（2.2）以介面注入，
 // 便於測試（fake 滿足）並維持感測器對 Drive API 的最小依賴面。真實實作為 *APIClient。

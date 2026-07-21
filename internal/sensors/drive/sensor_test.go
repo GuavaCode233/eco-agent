@@ -61,7 +61,7 @@ func newSensor(t *testing.T, q *queue.Queue, sampler QuotaSampler, clk *clock) *
 func TestColdStart(t *testing.T) {
 	ctx := context.Background()
 	q := newTestQueue(t)
-	sampler := &fakeSampler{quota: Quota{Usage: 3_000_000_000}} // 3 GB
+	sampler := &fakeSampler{quota: Quota{UsageInDrive: 3_000_000_000}} // 3 GB
 	clk := &clock{t: time.Date(2026, 7, 21, 10, 0, 0, 0, time.UTC)}
 	s := newSensor(t, q, sampler, clk)
 
@@ -80,7 +80,7 @@ func TestColdStart(t *testing.T) {
 func TestNotYetDue(t *testing.T) {
 	ctx := context.Background()
 	q := newTestQueue(t)
-	sampler := &fakeSampler{quota: Quota{Usage: 1_000_000_000}}
+	sampler := &fakeSampler{quota: Quota{UsageInDrive: 1_000_000_000}}
 	clk := &clock{t: time.Date(2026, 7, 21, 10, 0, 0, 0, time.UTC)}
 	s := newSensor(t, q, sampler, clk)
 
@@ -100,7 +100,7 @@ func TestNotYetDue(t *testing.T) {
 func TestDueAfterInterval(t *testing.T) {
 	ctx := context.Background()
 	q := newTestQueue(t)
-	sampler := &fakeSampler{quota: Quota{Usage: 1_000_000_000}}
+	sampler := &fakeSampler{quota: Quota{UsageInDrive: 1_000_000_000}}
 	clk := &clock{t: time.Date(2026, 7, 21, 10, 0, 0, 0, time.UTC)}
 	s := newSensor(t, q, sampler, clk)
 
@@ -117,7 +117,7 @@ func TestDueAfterInterval(t *testing.T) {
 func TestBootCatchUp(t *testing.T) {
 	ctx := context.Background()
 	q := newTestQueue(t)
-	sampler := &fakeSampler{quota: Quota{Usage: 2_000_000_000}}
+	sampler := &fakeSampler{quota: Quota{UsageInDrive: 2_000_000_000}}
 	clk := &clock{t: time.Date(2026, 7, 21, 10, 0, 0, 0, time.UTC)}
 
 	// 手動寫入 5 天前的時間戳，模擬上次查詢後關機數日。
@@ -154,7 +154,7 @@ func TestSampleErrorNoTimestampUpdate(t *testing.T) {
 
 	// 恢復正常 → 下次巡檢因時間戳仍不存在而視為到期，重試成功。
 	sampler.err = nil
-	sampler.quota = Quota{Usage: 1_000_000_000}
+	sampler.quota = Quota{UsageInDrive: 1_000_000_000}
 	s.checkAndSample(ctx)
 	if _, ok, _ := q.GetState(ctx, StateKeyLastCheck); !ok {
 		t.Error("恢復後應重試成功並寫入時間戳")
@@ -165,7 +165,7 @@ func TestSampleErrorNoTimestampUpdate(t *testing.T) {
 func TestIdempotentSameDay(t *testing.T) {
 	ctx := context.Background()
 	q := newTestQueue(t)
-	sampler := &fakeSampler{quota: Quota{Usage: 1_000_000_000}}
+	sampler := &fakeSampler{quota: Quota{UsageInDrive: 1_000_000_000}}
 	clk := &clock{t: time.Date(2026, 7, 21, 0, 0, 0, 0, time.UTC)}
 	s := newSensor(t, q, sampler, clk)
 
@@ -174,7 +174,7 @@ func TestIdempotentSameDay(t *testing.T) {
 	// 模擬同日重啟後再次到期：清時間戳（視為到期）、時間推進但仍同一天、用量變 2 GB。
 	_ = q.SetState(ctx, StateKeyLastCheck, "")
 	clk.t = time.Date(2026, 7, 21, 12, 0, 0, 0, time.UTC)
-	sampler.quota = Quota{Usage: 2_000_000_000}
+	sampler.quota = Quota{UsageInDrive: 2_000_000_000}
 	s.checkAndSample(ctx)
 
 	n, _ := q.Count(ctx)
@@ -182,6 +182,41 @@ func TestIdempotentSameDay(t *testing.T) {
 		t.Errorf("同一天應僅一筆（upsert），佇列筆數 = %d", n)
 	}
 	assertQueuedUsage(t, ctx, q, 2.0) // 最新值覆蓋
+}
+
+// TestUsesUsageInDriveNotUsage：drive_usage_gb 取 usageInDrive 而非帳號總 usage（v15 [D8]）。
+func TestUsesUsageInDriveNotUsage(t *testing.T) {
+	ctx := context.Background()
+	q := newTestQueue(t)
+	// usage（含 Gmail/Photos）遠大於 usageInDrive；歸戶應只取 usageInDrive。
+	sampler := &fakeSampler{quota: Quota{Usage: 50_000_000_000, UsageInDrive: 4_000_000_000}}
+	clk := &clock{t: time.Date(2026, 7, 21, 10, 0, 0, 0, time.UTC)}
+	s := newSensor(t, q, sampler, clk)
+
+	s.checkAndSample(ctx)
+	assertQueuedUsage(t, ctx, q, 4.0) // 4 GB（usageInDrive），非 50 GB（usage）
+}
+
+// TestTrashFieldDisabled：drive_trash_gb 現階段不啟用，payload 不應含此欄（v15 [D8] 待確認）。
+func TestTrashFieldDisabled(t *testing.T) {
+	ctx := context.Background()
+	q := newTestQueue(t)
+	sampler := &fakeSampler{quota: Quota{UsageInDrive: 4_000_000_000, UsageInDriveTrash: 500_000_000}}
+	clk := &clock{t: time.Date(2026, 7, 21, 10, 0, 0, 0, time.UTC)}
+	s := newSensor(t, q, sampler, clk)
+
+	s.checkAndSample(ctx)
+
+	batch, err := q.PeekBatch(ctx, 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(batch) == 0 {
+		t.Fatal("佇列為空")
+	}
+	if _, ok := batch[0].Payload["drive_trash_gb"]; ok {
+		t.Error("drive_trash_gb 不應出現在 payload（現階段不啟用）")
+	}
 }
 
 // assertQueuedUsage 斷言佇列中路徑 C 事件的 drive_usage_gb 約等於 wantGB。

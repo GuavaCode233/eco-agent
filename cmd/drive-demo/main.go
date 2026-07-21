@@ -94,7 +94,8 @@ func runFetch() {
 	} else {
 		fmt.Printf("  配額上限 limit             = 無上限（unlimited）\n")
 	}
-	fmt.Println("\n（2.5 將以 drive_usage_gb 換算能耗並走 HTTPS 送出；本步僅驗證真串取量。）")
+	fmt.Println("\n（能耗歸戶取 usageInDrive 作 drive_usage_gb，走 HTTPS 送出；v15 [D8]。")
+	fmt.Println("  usageInDriveTrash 另供 drive_trash_gb 減碳激勵任務，現階段不啟用、待組員確認。）")
 }
 
 // degradeHint 印出憑證未設定時的優雅降級指引（§6）。
