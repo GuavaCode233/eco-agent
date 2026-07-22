@@ -61,7 +61,7 @@ eco-agent/
 | Step 0 | 地基：本機持久化佇列 + 配置常數 + 綁定 mock + 上傳骨架（四重觸發） | — | — | ✅ |
 | Step 1 | 路徑 A：電腦使用（狀態值輪詢，短區間，active/idle 兩態，使用率加權、後端計算） | MQTT（mock 送出） | 固定區間輪詢 | ✅ |
 | Step 2 | 路徑 C：雲端儲存（狀態值輪詢，長區間，真串 Google Drive） | HTTPS（mock 送出） | 持久化時間戳到期判斷 | 🟡 |
-| Step 3 | 路徑 B：印表機（僅個人專屬機 SNMP 輪詢歸戶） | MQTT（mock 送出） | 持久化時間戳到期判斷 | ⬜ |
+| Step 3 | 路徑 B：印表機（僅個人專屬機 SNMP 輪詢歸戶） | MQTT（mock 送出） | 持久化時間戳到期判斷 | 🟡 |
 
 ### Step 0 — 地基（佇列 + 配置 + 上傳骨架）
 
@@ -110,7 +110,7 @@ eco-agent/
 
 | # | 子項 | 說明 | 狀態 |
 |---|------|------|------|
-| 3.1 | `internal/sensors/printer`（SNMP） | SNMP（UDP 161）查 OID `1.3.6.1.2.1.43.10.2.1.4`（page counter 累計值），前後相減得增量頁數，以 mock ID Token 歸戶 | ⬜ |
+| 3.1 | `internal/sensors/printer`（SNMP） | SNMP（UDP 161）查 OID `1.3.6.1.2.1.43.10.2.1.4`（page counter 累計值），前後相減得增量頁數，以 mock ID Token 歸戶 | ✅ |
 | 3.2 | 感測模式（時間戳） | page counter 無推播 → 只能**輪詢**；用 `printerPollInterval`（暫定 300 秒、標 TODO）；同屬狀態量長輪詢，**沿用 Step 2 時間戳到期判斷**（`lastPrinterPollAt`，同掛 `checkInterval`） | ⬜ |
 | 3.3 | 能耗換算與送出 | 能耗 = 增量頁數 × 紙張生命週期係數；Payload：`date`、`print_pages`；走 MQTT（現 mock 送出） | ⬜ |
 | 3.4 | BYOD 摩擦點 | SNMP 需與印表機同網段——啟動時檢查連通性，不通則跳過並記 log，不使 Agent 卡住 | ⬜ |
