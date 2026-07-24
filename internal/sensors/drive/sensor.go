@@ -29,13 +29,6 @@ import (
 // StateKeyLastCheck 為路徑 C 上次查詢時間戳的持久化鍵名（存 queue 的 state KV）。
 const StateKeyLastCheck = "lastDriveQuotaCheckAt"
 
-// enableTrashIncentive 控制是否於 payload 送出 drive_trash_gb（取自 usageInDriveTrash，
-// v15 [D8] 減碳激勵任務用：「可立即釋放的儲存能耗」）。
-//
-// 現為 false：欄位與換算已實作但**不啟用**——待與組員確認切分方式與激勵回饋機制後翻為 true。
-// TODO(backend): 與組員確認後啟用 drive_trash_gb（是否納入 payload、App/儀表板如何呈現與回饋）。
-const enableTrashIncentive = false
-
 // idTokenProvider 抽象「取員工 ID Token」，由 *enroll.Enroller 滿足（與路徑 A 一致）。
 type idTokenProvider interface {
 	IDToken() (string, error)
@@ -176,13 +169,7 @@ func (s *Sensor) enqueue(ctx context.Context, quota Quota) error {
 	payload := map[string]any{
 		"date":           date,
 		"drive_usage_gb": driveUsageGB,
-	}
-
-	// drive_trash_gb 取 usageInDriveTrash，作「可立即釋放的儲存能耗」減碳激勵任務（v15 [D8]）。
-	// usageInDriveTrash 已內含於 usageInDrive，此欄為「其中可釋放部分」的拆分、非額外能耗。
-	// 現階段結構預留、不啟用（見 enableTrashIncentive 常數說明）。
-	if enableTrashIncentive {
-		payload["drive_trash_gb"] = round6(quota.UsageInDriveTrashGB())
+		"drive_trash_gb": round6(quota.UsageInDriveTrashGB()),	// 啟用 usageInDriveTrash 以支援「可立即釋放的儲存能耗」減碳激勵任務（v15 [D8]）。
 	}
 
 	e := queue.Event{
