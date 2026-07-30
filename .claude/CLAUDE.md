@@ -4,8 +4,15 @@
 > **本檔已內嵌 Eco-Agent 所需的全部規格（參數、觸發邏輯、payload、換算式、開發步驟），可自足執行，無需另讀其他文件即可完成任務。**
 > 完整專案脈絡與各項設計的決策依據（「為什麼這樣選」）見背景參考文件 `docs/Eco-Sensing_專案context文件_v20.md` 第 4.4 節（數位能耗監測 Desktop Agent）。若本檔與 v20 語意衝突，以 v20 為準。
 >
-> **建議放置位置**：本檔放 `eco-agent/CLAUDE.md`（專案根目錄，Claude Code 啟動時自動讀取為常駐脈絡）；v20 背景文件放 `eco-agent/docs/` 供人回溯，不作為 Claude Code 主脈絡。兩者皆納入版控（勿被 `.gitignore` 忽略），供組員共享。`§2` 開發步驟表的「狀態」欄請隨進度更新。
-
+> **建議放置位置**：本檔放 `eco-agent/.claude/CLAUDE.md`（專案根目錄，Claude Code 啟動時自動讀取為常駐脈絡）；v20 背景文件放 `eco-agent/docs/` 供人回溯，不作為 Claude Code 主脈絡。兩者皆納入版控（勿被 `.gitignore` 忽略），供組員共享。`§2` 開發步驟表的「狀態」欄請隨進度更新。
+>
+> This project has a knowledge graph at graphify-out/ with god nodes, community structure, and cross-file relationships.
+> Rules:
+>
+> - For codebase questions, first run `graphify query "<question>"` when graphify-out/graph.json exists. Use `graphify path "<A>" "<B>"` for relationships and `graphify explain  "<concept>"` for focused concepts. These return a scoped subgraph, usually much smaller than GRAPH_REPORT.md or raw grep output.
+> - If graphify-out/wiki/index.md exists, use it for broad navigation instead of raw source browsing.
+> - Read graphify-out/GRAPH_REPORT.md only for broad architecture review or when query/path/explain do not surface enough context.
+> - After modifying code, run `graphify update .` to keep the graph current (AST-only, no API cost).
 
 ---
 
@@ -28,7 +35,7 @@
 - **並行模型**：三條感測路徑各自為獨立 goroutine；佇列巡檢（`checkInterval`）一條 goroutine；彼此以 channel／執行緒安全的佇列溝通。
 - **本機佇列**：落磁碟持久化（**SQLite 單檔優先**，或 append-only 檔）。**絕不可只放記憶體**——關機/崩潰後資料須仍在。
 - **去識別化**：上傳前打包時**移除姓名/Email，只保留員工 ID Token**。Agent 全程只持有不可逆 token，不直接持有員工 ID。
-- **傳輸協定**：電腦（路徑 A）與印表機（路徑 B）走 MQTT；雲端（路徑 C）走 HTTPS 直進後端 REST（不經 MQTT Broker）。**現階段兩者的實際送出都先 mock（見 §7）**，但要保留協定分流的程式結構。
+- **傳輸協定**：三條路徑（A 電腦／B 印表機／C 雲端）**一律走 HTTPS 直進後端 REST，Agent 不連線 MQTT Broker**（v20 §4.4 **[D13]**，v0.20 定案；原「A／B 走 MQTT」之設計已廢止，協定分流結構已移除）。理由：「後端回 200 才清佇列」在 MQTT 上不成立（PUBACK 由 Broker 而非後端發出），且撤銷（`401/403`）與配置版本號夾帶皆需 HTTP 回應語意。**現階段實際送出仍先 mock（見 §7）**。
 - **憑證保護**：Refresh Token 存系統金鑰庫（Windows DPAPI／macOS Keychain），**不寫純文字檔**。現階段 token 為 mock 常數，但**存取介面要照金鑰庫抽象寫**，日後換真值不改結構。
 
 ### 建議專案結構（可依 Go 慣例調整，但職責分離要保留）
@@ -59,9 +66,9 @@ eco-agent/
 | 步驟 | 內容 | 產出協定 | 觸發模式 | 狀態 |
 |------|------|----------|----------|------|
 | Step 0 | 地基：本機持久化佇列 + 配置常數 + 綁定 mock + 上傳骨架（四重觸發） | — | — | ✅ |
-| Step 1 | 路徑 A：電腦使用（狀態值輪詢，短區間，active/idle 兩態，使用率加權、後端計算） | MQTT（mock 送出） | 固定區間輪詢 | ✅ |
+| Step 1 | 路徑 A：電腦使用（狀態值輪詢，短區間，active/idle 兩態，使用率加權、後端計算） | HTTPS（mock 送出） | 固定區間輪詢 | ✅ |
 | Step 2 | 路徑 C：雲端儲存（狀態值輪詢，長區間，真串 Google Drive） | HTTPS（mock 送出） | 持久化時間戳到期判斷 | ✅ |
-| Step 3 | 路徑 B：印表機（僅個人專屬機 SNMP 輪詢歸戶） | MQTT（mock 送出） | 持久化時間戳到期判斷 | ✅ |
+| Step 3 | 路徑 B：印表機（僅個人專屬機 SNMP 輪詢歸戶） | HTTPS（mock 送出） | 持久化時間戳到期判斷 | ✅ |
 
 ### Step 0 — 地基（佇列 + 配置 + 上傳骨架）
 
@@ -100,7 +107,7 @@ eco-agent/
 | 2.2 | 觸發模型（時間戳） | 不用絕對計時器；用**持久化時間戳 `lastDriveQuotaCheckAt`**（與佇列同一份 SQLite/落磁碟，見 `queue.SetState/GetState`）；**掛 `checkInterval`（60 秒巡檢）**，判斷 `now() - lastDriveQuotaCheckAt >= driveQuotaInterval`（24h）才查、`Enqueue`、更新時間戳。掛巡檢而非 `computerUsageRecordInterval`（職責分離）。查詢／入列失敗不更新時間戳，下次巡檢自然重試 | ✅ |
 | 2.3 | 冷啟動 | 時間戳不存在（`GetState` ok=false）或無法解析視為「已到期」，第一次巡檢即查並寫入時間戳 | ✅ |
 | 2.4 | 開機補查 | 關機數日後開機，若距上次查詢已超過 `driveQuotaInterval`，開機後首次巡檢自動補查——與「開機後檢查」合流（`Run` 啟動先立即巡檢一次），**無需另寫** | ✅ |
-| 2.5 | 能耗換算與送出 | Agent 純感測、只送原始量（比照路徑 A）：Payload `{date, drive_usage_gb, drive_trash_gb}`（`drive_usage_gb` = `usageInDrive` 換算 GB，v20 [D8]；否決 `usage`／`limit`），能耗（儲存量GB × PUE × 電力係數）由後端計算；走 HTTPS（協定分流由 uploader 處理，現 mock 送出）。`drive_trash_gb`（= `usageInDriveTrash`，減碳激勵任務用「可立即釋放的儲存能耗」）**已啟用**一併送出 | ✅ |
+| 2.5 | 能耗換算與送出 | Agent 純感測、只送原始量（比照路徑 A）：Payload `{date, drive_usage_gb, drive_trash_gb}`（`drive_usage_gb` = `usageInDrive` 換算 GB，v20 [D8]；否決 `usage`／`limit`），能耗（儲存量GB × PUE × 電力係數）由後端計算；走 HTTPS（三路徑一律 HTTPS，見 [D13]；由 uploader 統一送出，現 mock）。`drive_trash_gb`（= `usageInDriveTrash`，減碳激勵任務用「可立即釋放的儲存能耗」）**已啟用**一併送出 | ✅ |
 | 2.V | 獨立驗證 | `cmd/drive-sensor-demo`：縮短 `driveQuotaInterval` 觀察到期即查；預置很久以前時間戳 → 啟動即補查；冷啟動（無時間戳）第一次即查 | ✅ |
 | 2.M | 合併驗證 | A + C 同跑，各自節奏、共用同一佇列與上傳觸發 | ✅ |
 
@@ -112,7 +119,7 @@ eco-agent/
 |---|------|------|------|
 | 3.1 | `internal/sensors/printer`（SNMP） | SNMP（UDP 161）查 OID `1.3.6.1.2.1.43.10.2.1.4`（page counter 累計值），前後相減得增量頁數，以 mock ID Token 歸戶 | ✅ |
 | 3.2 | 感測模式（時間戳） | page counter 無推播 → 只能**輪詢**；用 `printerPollInterval`（暫定 300 秒、標 TODO）；同屬狀態量長輪詢，**沿用 Step 2 時間戳到期判斷**（`lastPrinterPollAt`，同掛 `checkInterval`） | ✅ |
-| 3.3 | 能耗換算與送出 | 能耗 = 增量頁數 × 紙張生命週期係數；Payload：`date`、`print_pages`；走 MQTT（現 mock 送出） | ✅ |
+| 3.3 | 能耗換算與送出 | 能耗 = 增量頁數 × 紙張生命週期係數；Payload：`date`、`print_pages`；走 HTTPS（[D13]，現 mock 送出） | ✅ |
 | 3.4 | BYOD 摩擦點 | SNMP 需與印表機同網段——啟動時檢查連通性，不通則跳過並記 log，不使 Agent 卡住 | ✅ |
 | 3.V | 獨立驗證 | 對可 SNMP 的印表機（或本機 mock SNMP responder）輪詢，確認增量頁數正確、歸戶到 mock ID Token | ✅ |
 | 3.M | 合併驗證 | A + C + B 三路徑齊跑，單一佇列匯集、四重觸發統一上傳，端到端 demo | ✅ |
@@ -228,13 +235,3 @@ eco-agent/
 - Refresh Token 走金鑰庫抽象，**不寫純文字檔**（即使現在是 mock 值）。
 - 佇列**只在 200 後清除**；at-least-once 不可打折。
 - 開發順序**嚴格 A → C → B**，每步可獨立/合併測試。
-
-## graphify
-
-This project has a knowledge graph at graphify-out/ with god nodes, community structure, and cross-file relationships.
-
-Rules:
-- For codebase questions, first run `graphify query "<question>"` when graphify-out/graph.json exists. Use `graphify path "<A>" "<B>"` for relationships and `graphify explain "<concept>"` for focused concepts. These return a scoped subgraph, usually much smaller than GRAPH_REPORT.md or raw grep output.
-- If graphify-out/wiki/index.md exists, use it for broad navigation instead of raw source browsing.
-- Read graphify-out/GRAPH_REPORT.md only for broad architecture review or when query/path/explain do not surface enough context.
-- After modifying code, run `graphify update .` to keep the graph current (AST-only, no API cost).

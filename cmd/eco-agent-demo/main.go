@@ -93,7 +93,7 @@ func demoFourTriggers(ctx context.Context, cfg config.Config, q *queue.Queue, en
 
 	// ── 觸發 2／4：累積達量（threshold）──
 	banner("觸發 2/4 累積達量 (thresholdCount=" + itoa(cfg.ThresholdCount) + ")")
-	// 混路徑：路徑 C 走 HTTPS、其餘走 MQTT，一併演示協定分流。
+	// 混路徑：三路徑一律走 HTTPS（[D13]），同一批次一起送出。
 	enqueue(ctx, q, enr, queue.PathComputer, 2)
 	enqueue(ctx, q, enr, queue.PathDrive, 1)
 	want += 3
@@ -175,7 +175,7 @@ func enqueue(ctx context.Context, q *queue.Queue, enr *enroll.Enroller, p queue.
 			fatal("Enqueue", err)
 		}
 	}
-	fmt.Printf("  Enqueue %d 筆（路徑 %s，協定 %s）\n", n, p, uploader.ProtocolFor(p))
+	fmt.Printf("  Enqueue %d 筆（路徑 %s，協定 https）\n", n, p)
 }
 
 func demoPayload(p queue.PathType, date string) map[string]any {

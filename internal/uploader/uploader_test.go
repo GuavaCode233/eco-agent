@@ -154,27 +154,25 @@ func TestRevocationSelfClear(t *testing.T) {
 	}
 }
 
-// TestProtocolSplit 驗證協定分流：路徑 A/B 走 MQTT、路徑 C 走 HTTPS，皆送達 mock。
-func TestProtocolSplit(t *testing.T) {
+// TestAllPathsSingleHTTPSBatch 驗證 [D13]：三路徑不再分流協定，同一次 flush 只發一次
+// HTTPS 請求、整批一起送達（不再依路徑拆成兩批）。
+func TestAllPathsSingleHTTPSBatch(t *testing.T) {
 	ctx := context.Background()
 	h := newHarness(t, testCfg())
-	enqueueN(t, h.q, queue.PathComputer, 2) // MQTT
-	enqueueN(t, h.q, queue.PathPrinter, 1)  // MQTT
-	enqueueN(t, h.q, queue.PathDrive, 2)    // HTTPS
+	enqueueN(t, h.q, queue.PathComputer, 2)
+	enqueueN(t, h.q, queue.PathPrinter, 1)
+	enqueueN(t, h.q, queue.PathDrive, 2)
 
 	if err := h.up.Flush(ctx, ReasonManual); err != nil {
 		t.Fatalf("Flush: %v", err)
 	}
 
-	byProto := map[string]int{}
-	for _, b := range h.mock.Received() {
-		byProto[b.Protocol] += len(b.EventIDs)
+	got := h.mock.Received()
+	if len(got) != 1 {
+		t.Fatalf("mock received %d batches, want 1 (三路徑共用單一 HTTPS 批次)", len(got))
 	}
-	if byProto["mqtt"] != 3 {
-		t.Errorf("mqtt events = %d, want 3 (computer+printer)", byProto["mqtt"])
-	}
-	if byProto["https"] != 2 {
-		t.Errorf("https events = %d, want 2 (drive)", byProto["https"])
+	if n := len(got[0].EventIDs); n != 5 {
+		t.Errorf("batch events = %d, want 5 (computer 2 + printer 1 + drive 2)", n)
 	}
 	if n := mustCount(t, h.q); n != 0 {
 		t.Fatalf("queue count = %d, want 0", n)

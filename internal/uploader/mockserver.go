@@ -19,7 +19,6 @@ type MockIngestServer struct {
 // ReceivedBatch 是 mock 端點收到的一批（去識別化後）資料。
 type ReceivedBatch struct {
 	IDToken  string
-	Protocol string
 	EventIDs []string
 }
 
@@ -55,7 +54,7 @@ func (m *MockIngestServer) handleIngest(w http.ResponseWriter, r *http.Request) 
 	}
 	var body wireBody
 	if err := json.NewDecoder(r.Body).Decode(&body); err == nil {
-		rb := ReceivedBatch{IDToken: body.IDToken, Protocol: body.Protocol}
+		rb := ReceivedBatch{IDToken: body.IDToken}
 		for _, e := range body.Events {
 			rb.EventIDs = append(rb.EventIDs, e.EventID)
 		}

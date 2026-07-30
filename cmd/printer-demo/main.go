@@ -149,7 +149,7 @@ func run(ctx context.Context, c *printer.SNMPClient, agent *printer.MockAgent, p
 	}
 
 	fmt.Printf("\n本次執行共採得增量 %d 頁。\n", total)
-	fmt.Println("（增量頁數將於 3.3 以 payload {date, print_pages} 入列、走 MQTT 送出；")
+	fmt.Println("（增量頁數將於 3.3 以 payload {date, print_pages} 入列、走 HTTPS 送出；")
 	fmt.Println("  能耗 = 增量頁數 × 紙張生命週期係數，由後端計算。）")
 }
 

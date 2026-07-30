@@ -13,8 +13,8 @@
 //
 // 送出（2.5）：Agent 純感測、只送原始量（比照路徑 A）；payload {date, drive_usage_gb}，
 //
-//	能耗（= 儲存量GB × PUE × 電力係數）由後端計算。走 HTTPS（協定分流由 uploader 處理，
-//	現階段 mock 送出）。
+//	能耗（= 儲存量GB × PUE × 電力係數）由後端計算。走 HTTPS（三路徑一律 HTTPS，見 [D13]；
+//	由 uploader 統一送出，現階段 mock 端點）。
 package drive
 
 import (

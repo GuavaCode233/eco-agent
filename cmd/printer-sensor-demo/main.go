@@ -87,7 +87,7 @@ func main() {
 	fmt.Printf("checkInterval=%v printerPollInterval=%v（持久化時間戳到期判斷，非絕對計時器）\n",
 		cfg.CheckInterval, cfg.PrinterPollInterval)
 	fmt.Printf("mock 印表機：%s:%d　OID：%s\n", host, port, printer.DefaultPageCounterOID)
-	fmt.Printf("mock 端點：%s（路徑 B 走 %s）\n", ts.URL, uploader.ProtocolFor(queue.PathPrinter))
+	fmt.Printf("mock 端點：%s（路徑 B 走 HTTPS，[D13] 起不再走 MQTT）\n", ts.URL)
 
 	// ── 情境 1：冷啟動只建立基準 ──
 	banner("情境 1：冷啟動即查，首次只建立基準、不入列（3.2）")

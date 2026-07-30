@@ -9,9 +9,11 @@ Eco-Sensing 專案的桌面能耗監測 Agent（Desktop Agent）。以 **Go** �
 | 路徑 | 內容 | 協定 | 狀態 |
 |------|------|------|------|
 | Step 0 | 地基：持久化佇列 + 配置 + 綁定 mock + 四重觸發上傳骨架 | — | ✅ |
-| Step 1（路徑 A） | 電腦使用（active/idle 分態、CPU 使用率、後端計算能耗） | MQTT（mock） | ✅ |
+| Step 1（路徑 A） | 電腦使用（active/idle 分態、CPU 使用率、後端計算能耗） | HTTPS（mock） | ✅ |
 | Step 2（路徑 C） | 雲端儲存（真串 Google Drive API v3 + 持久化時間戳觸發） | HTTPS（mock） | ✅ |
-| Step 3（路徑 B） | 印表機（SNMP 輪詢歸戶 + 持久化時間戳觸發） | MQTT（mock） | ✅ |
+| Step 3（路徑 B） | 印表機（SNMP 輪詢歸戶 + 持久化時間戳觸發） | HTTPS（mock） | ✅ |
+
+> 三路徑一律走 HTTPS（v20 §4.4 **[D13]**，v0.20 起）：原「A／B 走 MQTT」之設計已廢止，Eco-Agent 不再連線 MQTT Broker、不需 MQTT client 依賴。理由為「後端回 200 才清佇列」在 MQTT 上不成立（PUBACK 由 Broker 而非後端發出），且撤銷（401/403）與配置版本號夾帶皆需 HTTP 回應語意。
 
 後端尚未完成：綁定、集中配置、上傳端點/token 以常數／mock 替代；佇列、觸發、冪等、去識別化為真做。所有「等後端」處以標記標出（見下方清單）。
 
@@ -95,7 +97,7 @@ go run ./cmd/all-paths-demo -mock-printer    # 忽略 .env 的印表機，強制
 go run ./cmd/all-paths-demo -mock-drive      # 忽略 Google 憑證，強制用 mock 用量
 ```
 
-A（電腦，真實取樣）、C（雲端，有憑證就真串 Drive API）、B（印表機，有目標就真查）各以獨立 goroutine、各自節奏採集 → 匯入**同一份持久化佇列** → 由四重觸發統一批次上傳，並依路徑分流協定（A/B → MQTT、C → HTTPS）。結束時 cancel 模擬關機，示範 shutdown hook 搶送零頭，最後彙總 mock 端點實際收到的批次（依協定、依路徑）。
+A（電腦，真實取樣）、C（雲端，有憑證就真串 Drive API）、B（印表機，有目標就真查）各以獨立 goroutine、各自節奏採集 → 匯入**同一份持久化佇列** → 由四重觸發統一批次上傳（三路徑共用單一 HTTPS 傳輸，[D13]）。結束時 cancel 模擬關機，示範 shutdown hook 搶送零頭，最後彙總 mock 端點實際收到的批次（依路徑）。
 
 任一路徑不可用只降級該路徑，其餘照跑——設了但當下連不到的印表機亦然（只記 log、不入列，不影響 A/C）。
 

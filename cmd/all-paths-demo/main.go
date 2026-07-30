@@ -2,7 +2,7 @@
 //
 // 路徑 A（電腦使用）、路徑 C（雲端儲存）、路徑 B（印表機）各自以獨立 goroutine、各自的
 // 節奏採集，全部匯入**同一份持久化佇列**，再由 uploader 的**四重觸發**統一批次上傳到
-// in-process mock 端點，並依路徑分流協定（A/B 走 MQTT、C 走 HTTPS）。
+// in-process mock 端點。三路徑一律走 HTTPS、共用同一批次（v20 §4.4 [D13]，不再分流協定）。
 //
 // 各路徑的資料來源（有真的用真的，沒有才降級為 mock，並於畫面標示）：
 //   - 路徑 A：一律真實取樣（GetLastInputInfo／IOHID + gopsutil）。平台不支援則跳過該路徑。
@@ -144,10 +144,7 @@ func main() {
 	defer stopPrinter()
 
 	fmt.Printf("\n路徑狀態：A=%s｜C=%s｜B=%s\n", pathA, pathC, pathB)
-	fmt.Printf("協定分流：A→%s、B→%s、C→%s\n\n",
-		uploader.ProtocolFor(queue.PathComputer),
-		uploader.ProtocolFor(queue.PathPrinter),
-		uploader.ProtocolFor(queue.PathDrive))
+	fmt.Printf("傳輸協定：A／B／C 一律 HTTPS（[D13]，Agent 不連 MQTT Broker）\n\n")
 
 	// uploader 啟動：Run 一啟動即做「開機後檢查」補送（四重觸發之一）。
 	runCtx, cancel := context.WithCancel(ctx)
@@ -325,12 +322,13 @@ func summarize(ctx context.Context, q *queue.Queue, idToken, date string, p queu
 	}
 }
 
-// summary 依協定與路徑彙總 mock 端點實際收到的批次，驗證協定分流與三路徑匯流。
+// summary 依路徑彙總 mock 端點實際收到的批次，驗證三路徑匯流至同一條 HTTPS 上傳。
 func summary(mock *uploader.MockIngestServer) {
-	byProtocol := map[string]int{}
+	batches := mock.Received()
+	total := 0
 	byPath := map[string]int{}
-	for _, b := range mock.Received() {
-		byProtocol[b.Protocol] += len(b.EventIDs)
+	for _, b := range batches {
+		total += len(b.EventIDs)
 		for _, id := range b.EventIDs {
 			// 事件 ID 為 idToken|date|path（見 queue.EventID）。
 			if i := strings.LastIndex(id, "|"); i >= 0 {
@@ -339,8 +337,8 @@ func summary(mock *uploader.MockIngestServer) {
 		}
 	}
 	fmt.Printf("\n=== 合併驗證結果 ===\n")
-	fmt.Printf("mock 端點收到（依協定分流）：mqtt=%d（路徑 A+B）、https=%d（路徑 C）\n",
-		byProtocol["mqtt"], byProtocol["https"])
+	fmt.Printf("mock 端點收到：%d 筆／共 %d 個 HTTPS 批次（三路徑共用單一協定與批次，[D13]）\n",
+		total, len(batches))
 	fmt.Printf("mock 端點收到（依路徑，含同一事件多次 upsert 重送）：A=%d、C=%d、B=%d\n",
 		byPath[string(queue.PathComputer)], byPath[string(queue.PathDrive)],
 		byPath[string(queue.PathPrinter)])

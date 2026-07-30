@@ -8,6 +8,8 @@
 //
 // At-least-once：佇列僅在後端回 200 後才 MarkUploaded 清除；失敗保留、搭下次觸發重送。
 // 每筆帶唯一事件 ID，後端 upsert 冪等去重（重複送達不重複計算）。
+// 此合約以**三路徑全走 HTTPS** 為前提（v20 §4.4 [D13]）：200 由後端於批次落地（upsert commit）
+// 之後才回出、非由中介代發，故「收到 200」與「資料已在資料庫」等價（詳見 transport.go）。
 //
 // 重試策略（§4.4.4）：不設獨立重試計時器、不設次數上限、不採指數退避——失敗即留佇列，
 // 節奏跟隨既有稀疏觸發（最密 checkInterval）。
@@ -60,12 +62,13 @@ type Credentials interface {
 }
 
 // Uploader 協調佇列、憑證與傳輸，執行四重觸發上傳。
+// 三路徑共用單一 HTTPS 傳輸（v20 §4.4 [D13]），無協定分流。
 type Uploader struct {
-	q       Queue
-	creds   Credentials
-	cfg     config.Config
-	senders map[Protocol]Sender
-	log     *slog.Logger
+	q      Queue
+	creds  Credentials
+	cfg    config.Config
+	sender Sender
+	log    *slog.Logger
 
 	shutdownTimeout time.Duration
 
@@ -81,17 +84,14 @@ type Option func(*Uploader)
 // WithLogger 設定日誌器。
 func WithLogger(l *slog.Logger) Option { return func(u *Uploader) { u.log = l } }
 
-// WithSender 覆寫指定協定的 Sender（測試注入）。
-func WithSender(p Protocol, s Sender) Option {
-	return func(u *Uploader) { u.senders[p] = s }
+// WithSender 覆寫 Sender（測試注入）。
+func WithSender(s Sender) Option {
+	return func(u *Uploader) { u.sender = s }
 }
 
-// WithUploadURL 讓兩協定 Sender 皆指向指定 mock URL（測試指向 httptest）。
+// WithUploadURL 讓 Sender 指向指定 mock URL（測試指向 httptest）。
 func WithUploadURL(url string) Option {
-	return func(u *Uploader) {
-		u.senders[ProtocolMQTT] = NewMockHTTPSender(ProtocolMQTT, url)
-		u.senders[ProtocolHTTPS] = NewMockHTTPSender(ProtocolHTTPS, url)
-	}
+	return func(u *Uploader) { u.sender = NewMockHTTPSender(url) }
 }
 
 // WithShutdownTimeout 設定關機搶送的逾時。
@@ -106,13 +106,10 @@ func New(q Queue, creds Credentials, cfg config.Config, opts ...Option) *Uploade
 		url = DefaultUploadURL
 	}
 	u := &Uploader{
-		q:     q,
-		creds: creds,
-		cfg:   cfg,
-		senders: map[Protocol]Sender{
-			ProtocolMQTT:  NewMockHTTPSender(ProtocolMQTT, url),
-			ProtocolHTTPS: NewMockHTTPSender(ProtocolHTTPS, url),
-		},
+		q:               q,
+		creds:           creds,
+		cfg:             cfg,
+		sender:          NewMockHTTPSender(url),
 		log:             slog.Default(),
 		shutdownTimeout: 5 * time.Second,
 	}
@@ -263,54 +260,35 @@ func (u *Uploader) credentials(ctx context.Context) (idToken, accessToken string
 	return idToken, accessToken, nil
 }
 
-// sendBatch 依協定分流送出，回傳成功清除的事件 ID 與是否偵測到撤銷。
+// sendBatch 以單一 HTTPS 往返送出整批，回傳成功清除的事件 ID 與是否偵測到撤銷。
+// 三路徑共用同一批次、不再依路徑分流協定（[D13]），故一批即一次請求。
 func (u *Uploader) sendBatch(ctx context.Context, idToken, accessToken string, batch []queue.Event) (uploaded []string, revoked bool) {
-	groups := groupByProtocol(batch)
-	for _, proto := range protocolOrder {
-		evs := groups[proto]
-		if len(evs) == 0 {
-			continue
-		}
-		sender := u.senders[proto]
-		resp, err := sender.Send(ctx, Batch{
-			IDToken:     idToken,
-			AccessToken: accessToken,
-			Protocol:    proto,
-			Events:      evs,
-		})
-		if err != nil {
-			// 網路／離線錯誤：保留佇列，不重試迴圈（搭下次觸發）。
-			u.log.Warn("uploader: send failed, keeping in queue", "protocol", proto, "err", err)
-			continue
-		}
-		switch {
-		case resp.StatusCode == http.StatusOK:
-			uploaded = append(uploaded, eventIDs(evs)...)
-		case resp.StatusCode == http.StatusUnauthorized, resp.StatusCode == http.StatusForbidden:
-			// 撤銷夾帶檢查：自清憑證（含金鑰庫 Refresh Token）。
-			u.log.Warn("uploader: revocation detected, self-clearing credentials",
-				"protocol", proto, "status", resp.StatusCode)
-			if cerr := u.creds.ClearCredentials(); cerr != nil {
-				u.log.Warn("uploader: clear credentials failed", "err", cerr)
-			}
-			return uploaded, true
-		default:
-			// 其他非 200：保留佇列，下次觸發重送。
-			u.log.Warn("uploader: non-200 response, keeping in queue",
-				"protocol", proto, "status", resp.StatusCode)
-		}
+	resp, err := u.sender.Send(ctx, Batch{
+		IDToken:     idToken,
+		AccessToken: accessToken,
+		Events:      batch,
+	})
+	if err != nil {
+		// 網路／離線錯誤：保留佇列，不重試迴圈（搭下次觸發）。
+		u.log.Warn("uploader: send failed, keeping in queue", "err", err)
+		return nil, false
 	}
-	return uploaded, false
-}
-
-// groupByProtocol 依協定分組，組內維持原順序。
-func groupByProtocol(batch []queue.Event) map[Protocol][]queue.Event {
-	groups := make(map[Protocol][]queue.Event)
-	for _, e := range batch {
-		p := ProtocolFor(e.PathType)
-		groups[p] = append(groups[p], e)
+	switch resp.StatusCode {
+	case http.StatusOK:
+		return eventIDs(batch), false
+	case http.StatusUnauthorized, http.StatusForbidden:
+		// 撤銷夾帶檢查：自清憑證（含金鑰庫 Refresh Token）。
+		u.log.Warn("uploader: revocation detected, self-clearing credentials",
+			"status", resp.StatusCode)
+		if cerr := u.creds.ClearCredentials(); cerr != nil {
+			u.log.Warn("uploader: clear credentials failed", "err", cerr)
+		}
+		return nil, true
+	default:
+		// 其他非 200：保留佇列，下次觸發重送。
+		u.log.Warn("uploader: non-200 response, keeping in queue", "status", resp.StatusCode)
+		return nil, false
 	}
-	return groups
 }
 
 func eventIDs(evs []queue.Event) []string {

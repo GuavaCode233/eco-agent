@@ -88,7 +88,7 @@ func main() {
 	fmt.Printf("\n=== 路徑 C 觸發模型 demo（2.V / 2.M-C）===\n")
 	fmt.Printf("checkInterval=%v driveQuotaInterval=%v（不用 sleep(24h) 絕對計時器）\n",
 		cfg.CheckInterval, cfg.DriveQuotaInterval)
-	fmt.Printf("mock 端點：%s（路徑 C 走 HTTPS，協定=%s）\n", ts.URL, uploader.ProtocolFor(queue.PathDrive))
+	fmt.Printf("mock 端點：%s（路徑 C 走 HTTPS）\n", ts.URL)
 
 	// ── 情境 1：冷啟動 + 週期到期即查 ──
 	banner("情境 1：冷啟動即查（2.3）＋每 driveQuotaInterval 到期再查（2.2）")
