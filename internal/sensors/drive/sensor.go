@@ -11,7 +11,7 @@
 //
 //	與四重觸發的「開機後檢查」合流——Run 啟動時先立即巡檢一次，不等第一個 tick。
 //
-// 送出（2.5）：Agent 純感測、只送原始量（比照路徑 A）；payload {date, drive_usage_gb}，
+// 送出（2.5）：Agent 純感測、只送原始量（比照路徑 A）；payload {usage_date, drive_usage_gb}，
 //
 //	能耗（= 儲存量GB × PUE × 電力係數）由後端計算。走 HTTPS（三路徑一律 HTTPS，見 [D13]；
 //	由 uploader 統一送出，現階段 mock 端點）。
@@ -171,15 +171,17 @@ func (s *Sensor) enqueue(ctx context.Context, quota Quota) error {
 	// 標為可執行減碳任務（清空垃圾桶即減碳）。
 	driveTrashGB := round6(quota.UsageInDriveTrashGB())
 	payload := map[string]any{
-		"date":           date,
 		"drive_usage_gb": driveUsageGB,
 		"drive_trash_gb": driveTrashGB,
 	}
 
 	e := queue.Event{
-		ID:       queue.EventID(idToken, date, queue.PathDrive),
-		PathType: queue.PathDrive,
-		Payload:  payload,
+		ID:        queue.EventID(idToken, date, queue.PathDrive),
+		PathType:  queue.PathDrive,
+		UsageDate: date,
+		Payload:   payload,
+		// [D14]：本次查詢 storageQuota 的時間戳，供後端亂序抵達勝出判定。
+		CollectedAt: s.now(),
 	}
 	if err := s.q.Enqueue(ctx, e); err != nil {
 		return err

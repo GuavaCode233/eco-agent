@@ -213,12 +213,17 @@ func TestAccumulatesDailyPages(t *testing.T) {
 	if n, _ := q.Count(ctx); n != 1 {
 		t.Errorf("當日應僅一筆事件（upsert），實際 %d 筆", n)
 	}
-	if got := e.Payload["date"]; got != "2026-07-22" {
-		t.Errorf("date = %v, want 2026-07-22", got)
+	// usage_date 為共同欄位，存於事件專屬欄而非 payload 內。
+	if got := e.UsageDate; got != "2026-07-22" {
+		t.Errorf("UsageDate = %v, want 2026-07-22", got)
 	}
-	// 純感測：payload 只有感測值，不得夾帶任何能耗換算結果或係數。
-	if len(e.Payload) != 2 {
-		t.Errorf("payload 應只有 date 與 print_pages，實際：%v", e.Payload)
+	// 純感測：payload 只有感測值，不得夾帶共同欄位、能耗換算結果或係數。
+	if len(e.Payload) != 1 {
+		t.Errorf("payload 應只有 print_pages，實際：%v", e.Payload)
+	}
+	// [D14]：採集時間戳取自感測器時鐘，且隨每次 upsert 前進到最後一次輪詢的時刻。
+	if want := clk.now(); !e.CollectedAt.Equal(want) {
+		t.Errorf("CollectedAt = %v, want %v（最後一次採集的時刻）", e.CollectedAt, want)
 	}
 }
 

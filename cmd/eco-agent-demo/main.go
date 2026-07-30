@@ -166,10 +166,11 @@ func enqueue(ctx context.Context, q *queue.Queue, enr *enroll.Enroller, p queue.
 		seq++
 		date := time.Now().Format("2006-01-02")
 		e := queue.Event{
-			// 事件 ID 併入 seq 確保唯一（真實情境的穩定鍵為 idToken+date+path）。
-			ID:       queue.EventID(idToken, fmt.Sprintf("%s#%d", date, seq), p),
-			PathType: p,
-			Payload:  demoPayload(p, date),
+			// 事件 ID 併入 seq 確保唯一（真實情境的穩定鍵為 idToken+usage_date+path）。
+			ID:        queue.EventID(idToken, fmt.Sprintf("%s#%d", date, seq), p),
+			PathType:  p,
+			UsageDate: date,
+			Payload:   demoPayload(p),
 		}
 		if err := q.Enqueue(ctx, e); err != nil {
 			fatal("Enqueue", err)
@@ -178,16 +179,18 @@ func enqueue(ctx context.Context, q *queue.Queue, enr *enroll.Enroller, p queue.
 	fmt.Printf("  Enqueue %d 筆（路徑 %s，協定 https）\n", n, p)
 }
 
-func demoPayload(p queue.PathType, date string) map[string]any {
+// demoPayload 回傳該路徑的量值。共同欄位（usage_date／path_type／collected_at）不在此，
+// 由 queue.Event 的專屬欄位帶、上送時與量值攤平同層。
+func demoPayload(p queue.PathType) map[string]any {
 	switch p {
 	case queue.PathComputer:
-		return map[string]any{"date": date, "pc_active_hours": 1.5, "pc_tdp_w": 45}
+		return map[string]any{"pc_active_hours": 1.5, "pc_idle_hours": 0.5, "pc_avg_cpu_util": 12.0}
 	case queue.PathDrive:
-		return map[string]any{"date": date, "drive_usage_gb": 12.3}
+		return map[string]any{"drive_usage_gb": 12.3, "drive_trash_gb": 1.2}
 	case queue.PathPrinter:
-		return map[string]any{"date": date, "print_pages": 7}
+		return map[string]any{"print_pages": 7}
 	default:
-		return map[string]any{"date": date}
+		return map[string]any{}
 	}
 }
 

@@ -4,7 +4,7 @@
 // printerPollInterval/checkInterval 大幅縮短。示範：
 //   - 冷啟動（3.2）：無時間戳 → 感測器一啟動即查，首次只建立基準、不入列；
 //   - 到期即查＋增量累計（3.2/3.3）：mock 印表機的 page counter 增加後，到期輪詢取得增量，
-//     以 payload {date, print_pages}（當日累計）入列，經四重觸發上傳到 mock 端點；
+//     以 payload {usage_date, print_pages}（當日累計）入列，經四重觸發上傳到 mock 端點；
 //   - 開機補查：預先寫入「很久以前」的時間戳 → 新感測器一啟動即立刻補查；
 //   - BYOD 不可達（3.4）：關掉 mock 印表機 → 感測器只記 log、不入列、不卡住，恢復後續採。
 //

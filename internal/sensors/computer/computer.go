@@ -276,7 +276,6 @@ func (s *Sensor) enqueueToday(ctx context.Context) {
 	}
 
 	payload := map[string]any{
-		"date":            s.acc.date,
 		"pc_active_hours": round6(s.acc.activeHours),
 		"pc_idle_hours":   round6(s.acc.idleHours),
 		"pc_avg_cpu_util": round2(s.acc.avgCPU()),
@@ -295,9 +294,13 @@ func (s *Sensor) enqueueToday(ctx context.Context) {
 	}
 
 	e := queue.Event{
-		ID:       queue.EventID(idToken, s.acc.date, queue.PathComputer),
-		PathType: queue.PathComputer,
-		Payload:  payload,
+		ID:        queue.EventID(idToken, s.acc.date, queue.PathComputer),
+		PathType:  queue.PathComputer,
+		UsageDate: s.acc.date,
+		Payload:   payload,
+		// [D14]：本次採集的時間戳。當日累計值每輪詢一次即 upsert 一次，此戳隨之更新，
+		// 供後端在亂序抵達時判定「哪一次採集較新」。
+		CollectedAt: s.now(),
 	}
 	if err := s.q.Enqueue(ctx, e); err != nil {
 		s.log.Warn("path A: enqueue failed; retained in memory", "err", err)

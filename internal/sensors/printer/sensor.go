@@ -7,7 +7,7 @@
 //     才查、入列、更新時間戳；時間戳不存在（冷啟動）或無法解析視為「已到期」；
 //   - 查詢／入列失敗不更新時間戳，下次巡檢自然重試（不設獨立重試計時器、不指數退避）。
 //
-// 送出（3.3）：Agent 純感測、只送原始量（比照路徑 A/C）——payload {date, print_pages}
+// 送出（3.3）：Agent 純感測、只送原始量（比照路徑 A/C）——payload {usage_date, print_pages}
 // 僅含「當日累計增量頁數」這個感測值。能耗（= 頁數 × 紙張生命週期係數）一律由後端計算，
 // Agent 端不做任何換算，也不送任何係數。走 HTTPS（v20 §4.4 [D13] 起三路徑一律 HTTPS，
 // 由 uploader 統一送出；現階段 mock 端點）。
@@ -243,14 +243,16 @@ func (s *Sensor) enqueue(ctx context.Context, date string, pages int64) error {
 	// 純感測、只送原始量：僅「當日累計增量頁數」一個感測值。
 	// 能耗 = 頁數 × 紙張生命週期係數，換算完全在後端進行——Agent 不算、也不送係數。
 	payload := map[string]any{
-		"date":        date,
 		"print_pages": pages,
 	}
 
 	e := queue.Event{
-		ID:       queue.EventID(idToken, date, queue.PathPrinter),
-		PathType: queue.PathPrinter,
-		Payload:  payload,
+		ID:        queue.EventID(idToken, date, queue.PathPrinter),
+		PathType:  queue.PathPrinter,
+		UsageDate: date,
+		Payload:   payload,
+		// [D14]：本次 SNMP 輪詢的時間戳，供後端亂序抵達勝出判定。
+		CollectedAt: s.now(),
 	}
 	return s.q.Enqueue(ctx, e)
 }

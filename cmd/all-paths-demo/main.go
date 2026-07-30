@@ -328,11 +328,11 @@ func summary(mock *uploader.MockIngestServer) {
 	total := 0
 	byPath := map[string]int{}
 	for _, b := range batches {
-		total += len(b.EventIDs)
-		for _, id := range b.EventIDs {
+		total += len(b.Events)
+		for _, e := range b.Events {
 			// 事件 ID 為 idToken|date|path（見 queue.EventID）。
-			if i := strings.LastIndex(id, "|"); i >= 0 {
-				byPath[id[i+1:]]++
+			if i := strings.LastIndex(e.EventID, "|"); i >= 0 {
+				byPath[e.EventID[i+1:]]++
 			}
 		}
 	}

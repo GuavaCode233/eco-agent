@@ -65,9 +65,10 @@ func enqueueN(t *testing.T, q *queue.Queue, p queue.PathType, n int) {
 	for i := 0; i < n; i++ {
 		date := time.Date(2026, 7, 1+i, 0, 0, 0, 0, time.UTC).Format("2006-01-02")
 		e := queue.Event{
-			ID:       queue.EventID("mock-emp-idtoken-eco-0001", date, p),
-			PathType: p,
-			Payload:  map[string]any{"date": date, "pc_active_hours": 1.0},
+			ID:        queue.EventID("mock-emp-idtoken-eco-0001", date, p),
+			PathType:  p,
+			UsageDate: date,
+			Payload:   map[string]any{"pc_active_hours": 1.0},
 		}
 		if err := q.Enqueue(ctx, e); err != nil {
 			t.Fatalf("Enqueue: %v", err)
@@ -171,11 +172,100 @@ func TestAllPathsSingleHTTPSBatch(t *testing.T) {
 	if len(got) != 1 {
 		t.Fatalf("mock received %d batches, want 1 (三路徑共用單一 HTTPS 批次)", len(got))
 	}
-	if n := len(got[0].EventIDs); n != 5 {
+	if n := len(got[0].Events); n != 5 {
 		t.Errorf("batch events = %d, want 5 (computer 2 + printer 1 + drive 2)", n)
 	}
 	if n := mustCount(t, h.q); n != 0 {
 		t.Fatalf("queue count = %d, want 0", n)
+	}
+}
+
+// TestFlatRecordOnWire 驗證上送記錄為**扁平**單層（v20 §4.4）：共同欄位
+// usage_date／path_type／collected_at 與該路徑量值同層，不另包 payload 物件；
+// 且 collected_at 為 UTC RFC3339Nano，供後端做亂序抵達勝出判定（[D14]）。
+func TestFlatRecordOnWire(t *testing.T) {
+	ctx := context.Background()
+	h := newHarness(t, testCfg())
+
+	// 以非 UTC 時區的採集時戳入列，驗證上送前確實轉為 UTC。
+	collectedAt := time.Date(2026, 7, 16, 17, 30, 15, 123456789, time.FixedZone("CST", 8*3600))
+	e := queue.Event{
+		ID:          queue.EventID("mock-emp-idtoken-eco-0001", "2026-07-16", queue.PathComputer),
+		PathType:    queue.PathComputer,
+		UsageDate:   "2026-07-16",
+		Payload:     map[string]any{"pc_active_hours": 1.0},
+		CollectedAt: collectedAt,
+	}
+	if err := h.q.Enqueue(ctx, e); err != nil {
+		t.Fatalf("Enqueue: %v", err)
+	}
+	if err := h.up.Flush(ctx, ReasonManual); err != nil {
+		t.Fatalf("Flush: %v", err)
+	}
+
+	got := h.mock.Received()
+	if len(got) != 1 || len(got[0].Events) != 1 {
+		t.Fatalf("mock received %d batches, want 1 batch × 1 event", len(got))
+	}
+	we := got[0].Events[0]
+	if we.CollectedAt == "" {
+		t.Fatal("collected_at 未上送（[D14] 要求每筆皆帶採集時間戳）")
+	}
+	parsed, err := time.Parse(time.RFC3339Nano, we.CollectedAt)
+	if err != nil {
+		t.Fatalf("collected_at %q 非 RFC3339Nano: %v", we.CollectedAt, err)
+	}
+	if !parsed.Equal(collectedAt) {
+		t.Errorf("collected_at = %v, want %v（同一時刻）", parsed, collectedAt)
+	}
+	if _, offset := parsed.Zone(); offset != 0 {
+		t.Errorf("collected_at 時區偏移 = %d, want 0（[D14] 規定 UTC）：%q", offset, we.CollectedAt)
+	}
+	// path_type 由 Agent 明送、不由後端推斷（[D12]），值域即 queue.PathType（兩端無翻譯層）。
+	if we.PathType != string(queue.PathComputer) {
+		t.Errorf("path_type = %q, want %q", we.PathType, queue.PathComputer)
+	}
+	if we.UsageDate != "2026-07-16" {
+		t.Errorf("usage_date = %q, want 2026-07-16", we.UsageDate)
+	}
+
+	// 扁平：量值與共同欄位同層，且不得殘留巢狀 payload 物件或舊的 date 鍵。
+	if got := we.Fields["pc_active_hours"]; got != 1.0 {
+		t.Errorf("pc_active_hours = %v, want 1（量值須與共同欄位同層）；實收：%v", got, we.Fields)
+	}
+	if _, nested := we.Fields["payload"]; nested {
+		t.Errorf("記錄仍含巢狀 payload 物件：%v", we.Fields)
+	}
+	if _, old := we.Fields["date"]; old {
+		t.Errorf("記錄仍含舊的 date 鍵（應為 usage_date）：%v", we.Fields)
+	}
+}
+
+// TestReservedFieldsWinOverPayload 驗證共同欄位恆取自 Event 的專屬欄位：即使 payload 內混入
+// 同名鍵，攤平後也不得覆蓋——usage_date／path_type 是冪等唯一鍵組成，不可由量值 map 決定。
+func TestReservedFieldsWinOverPayload(t *testing.T) {
+	e := queue.Event{
+		ID:        "evt-1",
+		PathType:  queue.PathComputer,
+		UsageDate: "2026-07-16",
+		Payload: map[string]any{
+			"usage_date": "1999-01-01", "path_type": "bogus",
+			"event_id": "bogus", "collected_at": "bogus",
+			"pc_active_hours": 1.0,
+		},
+		CollectedAt: time.Date(2026, 7, 16, 9, 0, 0, 0, time.UTC),
+	}
+	m := wireEventOf(e)
+	for field, want := range map[string]any{
+		"event_id": "evt-1", "path_type": string(queue.PathComputer),
+		"usage_date": "2026-07-16", "collected_at": "2026-07-16T09:00:00Z",
+	} {
+		if m[field] != want {
+			t.Errorf("%s = %v, want %v（共同欄位不可被 payload 同名鍵覆蓋）", field, m[field], want)
+		}
+	}
+	if m["pc_active_hours"] != 1.0 {
+		t.Errorf("量值遺失：%v", m)
 	}
 }
 

@@ -18,8 +18,27 @@ type MockIngestServer struct {
 
 // ReceivedBatch 是 mock 端點收到的一批（去識別化後）資料。
 type ReceivedBatch struct {
-	IDToken  string
-	EventIDs []string
+	IDToken string
+	Events  []ReceivedEvent
+}
+
+// ReceivedEvent 是批次中的一筆事件。共同欄位單獨列出，其餘量值留在 Fields 內
+// （Fields 為完整的扁平記錄，含共同欄位本身）。
+type ReceivedEvent struct {
+	EventID     string
+	PathType    string
+	UsageDate   string
+	CollectedAt string         // RFC3339Nano（UTC），供驗證 [D14] 的亂序勝出時間戳確實上送
+	Fields      map[string]any // 收到的原始扁平記錄
+}
+
+// EventIDs 取出本批所有事件 ID。
+func (b ReceivedBatch) EventIDs() []string {
+	ids := make([]string, len(b.Events))
+	for i, e := range b.Events {
+		ids[i] = e.EventID
+	}
+	return ids
 }
 
 // NewMockIngestServer 建立回應指定狀態碼的 mock ingest server。status <= 0 視為 200。
@@ -56,7 +75,14 @@ func (m *MockIngestServer) handleIngest(w http.ResponseWriter, r *http.Request) 
 	if err := json.NewDecoder(r.Body).Decode(&body); err == nil {
 		rb := ReceivedBatch{IDToken: body.IDToken}
 		for _, e := range body.Events {
-			rb.EventIDs = append(rb.EventIDs, e.EventID)
+			str := func(k string) string { s, _ := e[k].(string); return s }
+			rb.Events = append(rb.Events, ReceivedEvent{
+				EventID:     str(fieldEventID),
+				PathType:    str(fieldPathType),
+				UsageDate:   str(fieldUsageDate),
+				CollectedAt: str(fieldCollectedAt),
+				Fields:      e,
+			})
 		}
 		m.mu.Lock()
 		m.received = append(m.received, rb)
@@ -86,7 +112,7 @@ func (m *MockIngestServer) EventCount() int {
 	defer m.mu.Unlock()
 	n := 0
 	for _, b := range m.received {
-		n += len(b.EventIDs)
+		n += len(b.Events)
 	}
 	return n
 }

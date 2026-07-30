@@ -212,10 +212,10 @@
   - **未來實作、測試（列為可行但待實作）**：共用印表機要歸戶到人須改用帶 user 欄位的來源——**Print Server Log**（逐工作帶送出者身份，天生事件式，可訂閱 Windows PrintService/Operational Event ID 307）或 **Pull Printing API**（刷卡列印，如 PaperCut，釋放前刷證驗證使身份與工作在源頭綁定）。兩者技術上皆可行、且「事件觸發＋歸戶」同時成立，但受限於實驗場域基礎設施前提，列為待實作與測試項。
 
 - **本地彙整與去識別化**：資料先寫入本機持久化佇列，於上傳前打包彙整——移除姓名/Email，僅保留員工 ID Token（符合個資合規）。上傳時機採多重觸發（不綁固定時刻），詳見 4.4.3。
-- **上傳 Payload**（HTTPS `POST {base_url}/digital-usage/batch`，`Authorization: Bearer <Access Token>`，body 為筆陣列，單次筆數上限 `uploadBatchMax`）：**每筆為「某裝置某日某路徑」的一筆感測結果**，共同欄位為 `usage_date`、`path_type`（列舉 `pc`／`printer`／`cloud`，**由 Agent 明送、不由後端推斷**，見 [D12]）、`collected_at`（Agent 端採集時間戳，UTC，供亂序抵達勝出判定，見 [D14]），其餘欄位依 `path_type` 而定：
-  - `path_type = pc`：pc_active_hours、pc_idle_hours、pc_avg_cpu_util、cpu_model
+- **上傳 Payload**（HTTPS `POST {base_url}/digital-usage/batch`，`Authorization: Bearer <Access Token>`，body 為筆陣列，單次筆數上限 `uploadBatchMax`）：**每筆為「某裝置某日某路徑」的一筆感測結果**，且為**扁平記錄**（共同欄位與量值同層，不另包 payload 物件）。共同欄位為 `event_id`（4.4.3 的穩定鍵，Agent 明送，後端可直接用作冪等鍵而不必自行重組）、`usage_date`、`path_type`（列舉 `computer`／`printer`／`drive`，**由 Agent 明送、不由後端推斷**，見 [D12]）、`collected_at`（Agent 端採集時間戳，UTC RFC3339Nano，供亂序抵達勝出判定，見 [D14]），其餘欄位依 `path_type` 而定：
+  - `path_type = computer`：pc_active_hours、pc_idle_hours、pc_avg_cpu_util、cpu_model
   - `path_type = printer`：print_pages
-  - `path_type = cloud`：drive_usage_gb（取自 `usageInDrive`）、drive_trash_gb（取自 `usageInDriveTrash`，供激勵任務用，見 [D8]）
+  - `path_type = drive`：drive_usage_gb（取自 `usageInDrive`）、drive_trash_gb（取自 `usageInDriveTrash`，供激勵任務用，見 [D8]）
   （電腦路徑改送原始量——active/idle 時數、平均 CPU 使用率、CPU 型號——不再送 `pc_tdp_w`；能耗由後端計算。`factor_id`／`co2e_kg` 屬後端查係數計算後寫入，**不在 Agent payload 內**。）
   - **`employee_id` 與 `device_id` 皆不在 payload 內**：Agent 只持有 `id_token`（4.4.2，per-device 一枚），後端以 `id_token` 查 `DEVICE_BINDING` 即**同時解出 `employee_id` 與 `device_id`** 二者並落庫。故 [D14] 將 `device_id` 納入唯一鍵一事，對 Agent payload 零改動（見 [D14]）。
 - **碳排換算（集中於後端）**：電力（電腦：使用率加權功率模型 `P_idle + 使用率 ×(P_active − P_idle)` × 時數 × 台電係數，`P_active` 由 CPU 型號查 TDP 表；未來可由 RAPL/powermetrics 即時功耗覆蓋）＋ 列印（頁數 × 紙張生命週期係數）＋ 雲端（`usageInDrive` GB × 每GB儲存能耗強度（kWh/GB/年，未含 PUE）× PUE（Google fleet-wide ~1.1）× 電力係數 × 時間比例；`usageInDriveTrash` 另計為「可釋放能耗」供激勵，見 [D8]、[D9]）。TDP 對照表、P_idle 比例、每GB儲存能耗強度、PUE、各項係數皆屬 `EMISSION_FACTOR`／係數配置，後端維護、不寫死於 Agent。
@@ -303,8 +303,8 @@ Eco-Agent 為無人值守背景程式，身份綁定採「**一次綁定、長�
 - 佇列資料**僅在後端回 `200` 確認後才標記已上傳並清除**；上傳失敗（離線、後端不可用、逾時、`5xx`）則保留，下次觸發重試。
 - **此合約成立的前提是全程 HTTPS（v0.20 [D13]）**：`200` 由**後端於批次落地（upsert commit）之後**才回出，非由中介代發，故「收到 200」與「資料已在資料庫」等價，不存在「Agent 已清佇列、資料卻仍在後端記憶體」的破口。**後端不得先回 `200` 再非同步落地**——該作法會重新打開此破口，屬實作上的硬性約束（見 5.1）。
 - 每筆帶**唯一事件 ID**（`id_token + usage_date + path_type` 組出穩定鍵；其中「路徑類型」即 payload 的 `path_type`，**由 Agent 明送並落庫為 `DIGITAL_USAGE.path_type`**，見 [D12]）。後端以 `id_token` 查 `DEVICE_BINDING`，**同時解出 `employee_id` 與 `device_id`**，據以 upsert；落庫唯一鍵與事件 ID 的粒度對齊（見 [D14]）：
-  - `path_type = pc`／`printer`：（`employee_id`, `usage_date`, `path_type`, `device_id`）——一裝置一列，員工層碳排以加總取得。
-  - `path_type = cloud`：（`employee_id`, `usage_date`, `path_type`）——雲端儲存為**帳號層級事實**，同員工多台裝置查得同一數值，若納入 `device_id` 會憑空重複計算。
+  - `path_type = computer`／`printer`：（`employee_id`, `usage_date`, `path_type`, `device_id`）——一裝置一列，員工層碳排以加總取得。
+  - `path_type = drive`：（`employee_id`, `usage_date`, `path_type`）——雲端儲存為**帳號層級事實**，同員工多台裝置查得同一數值，若納入 `device_id` 會憑空重複計算。
 - **亂序抵達的勝出規則**：每筆另帶 `collected_at`（Agent 端採集時間戳，UTC）。後端 upsert 僅當 `EXCLUDED.collected_at > digital_usage.collected_at` 時才更新，重送的舊封包不會蓋掉較新的值（見 [D14]）。原僅有 `usage_date`（日期粒度）不足以比較同日先後，故 v0.20 補此欄。
 - 重複送達不重複計算由 5.1 之兩層冪等機制保證（應用層依鍵摺疊 ＋ DB partial unique index），詳見 5.1「`DIGITAL_USAGE` 冪等去重」。
 
@@ -393,9 +393,13 @@ Eco-Agent 為無人值守背景程式，身份綁定採「**一次綁定、長�
 - **[D11] 印表機 SNMP 五參數：隨綁定本地設定，不走 5.2 全域下發**（v0.18）：路徑 B 的 `HOST`／`COMMUNITY`／`PORT`／`OID` 屬**per-device 的區域環境事實**（各機 IP／機種不同、且僅本地網路可知），與 5.2 集中配置服務所管的**全域策略參數**（採樣頻率、批次、QoS）性質不同：後端根本不知道某台桌機接的印表機 IP，強行由 `sensor_config` 下發等於要後端發它沒有的資料，且會使該表從「策略表」退化為「逐機組態表」。故五參數隨 4.4.2 綁定於本機 `.env` 設定（實務上多數環境只需填 `HOST`，其餘用預設；非標準 index 機種另覆寫 `OID`），綁定時可將非敏感的 `HOST`／`OID` 上報供後台監控，但不由後端反向下發覆蓋本地。惟輪詢區間 `printerPollInterval`（多久讀一次）仍是全域策略，續走 5.2 下發（4.4.4）。判準與 [D8] 拒用 `limit`（全員雷同無區辨力）、[D3] 電梯「歸戶綁可控行為」一致：**per-device 本地事實不進 `sensor_config`，全域可調策略才進**。
   - **附註（參數調整時機與生效方式）**：五參數於綁定完成後由 Agent 讀取，與身份憑證解耦（不需 token／employee_id 即可填，掃碼前後填皆可）；且**可隨時修改**——改 `.env` 後重啟 Agent 即重讀生效（換印表機／填錯 IP 皆不需重走綁定），未來可選加 system tray 設定入口＋測試連線按鈕（存檔前跑一次 `snmpget` 驗證能否讀到 page counter）以降低 BYOD 填錯摩擦。惟 `printerPollInterval` 不在此列，仍走 5.2 全域下發。
 - **[D12] `DIGITAL_USAGE` 採「一路徑一列」（方案 A），`path_type` 由 Agent 明送而非後端推斷**（v0.19）：三條感測路徑（A 電腦／B 印表機／C 雲端）觸發時機與欄位組各異，且 4.4.3 事件 ID 已定為 `id_token + 日期 + 路徑類型`。ERD 原 `DIGITAL_USAGE` 無路徑欄位，三路徑的列無從區分、亦無法建唯一鍵做 upsert，屬設計缺口。
-  - **採方案 A（一路徑一列）**：新增 `path_type` 欄（列舉 `pc`／`printer`／`cloud`），唯一鍵 =（`employee_id`, `usage_date`, `path_type`），三路徑各自成列、只填自身欄位組，其餘為 NULL。與 4.4.3 現行事件 ID 三段結構完全一致，改動最小。（否決方案 B「一天一列合併、以 partial update 各自 upsert 同列」：三路徑觸發時間不同會互相覆寫，需 partial update 語意，且與 4.4.3 事件 ID 定義不一致。）
+  - **採方案 A（一路徑一列）**：新增 `path_type` 欄（列舉 `computer`／`printer`／`drive`，值域與 Agent 內部路徑識別一致，見下「列舉值取用 Agent 詞彙」），唯一鍵 =（`employee_id`, `usage_date`, `path_type`），三路徑各自成列、只填自身欄位組，其餘為 NULL。與 4.4.3 現行事件 ID 三段結構完全一致，改動最小。（否決方案 B「一天一列合併、以 partial update 各自 upsert 同列」：三路徑觸發時間不同會互相覆寫，需 partial update 語意，且與 4.4.3 事件 ID 定義不一致。）
   - **`path_type` 必須由 Agent 明送，不由後端從欄位樣態推斷**：(a) **零值與 NULL 難分辨**——`print_pages = 0`（當天沒列印但正常感測）、`drive_trash_gb = 0`（垃圾桶已清空，恰是激勵任務最想記錄的成功狀態）皆為合法資料，其欄位樣態與「該路徑未上傳」難以區分；(b) **推斷規則隨欄位演進而脆化**，新增路徑或欄位重疊時規則須跟改，形成隱性耦合；(c) **與冪等鍵不自洽**——`path_type` 既是唯一鍵組成，就必須在資料抵達時為確定明示值，用推導值當鍵等於讓去重正確性依賴推導規則不出錯；(d) **Agent 本就知道答案**——三路徑在 Agent 端是三個獨立採集器各自觸發，產生資料時百分之百知道自身路徑，丟棄該確定資訊再由後端猜回是把明確變模糊。
   - **欄位歸屬釐清**：Agent 上傳 = `id_token`（後端解析為 `employee_id`）＋ `usage_date` ＋ `path_type` ＋ 該路徑原始量；後端寫入 = `factor_id`、`co2e_kg`（依 5.1「Agent 純感測、碳排計算集中後端」與 [D7]，`factor_id` 係後端查 `EMISSION_FACTOR` 後才決定，Agent 無從得知，故不在 payload 內）。後端依 `path_type` **讀取明示值做分派**（決定查哪類係數），非推斷。
+  - **列舉值取用 Agent 詞彙（`computer`／`printer`／`drive`，v0.20 修訂）**：本欄原訂為 `pc`／`printer`／`cloud`，與 Agent 內部路徑識別（`queue.PathType`）所用的 `computer`／`printer`／`drive` 不一致。後端資料庫當時已建置但尚無資料，故改以 Agent 值為準、DB 端調整，理由如下：
+    - **避免引入翻譯層，與本決策自身的論證一致**：若兩端詞彙不同，Agent 送出前或後端落庫前必須有一層映射。本決策 (c) 點主張「用推導值當鍵等於讓去重正確性依賴推導規則不出錯」——一層詞彙映射同樣是「一條必須不出錯的規則」，只是換到另一個位置。`path_type` 既是冪等唯一鍵組成，映射一旦寫錯或漏改（例如新增路徑時），去重會**靜默失效**而非報錯。
+    - **Agent 端該詞彙已是既成事實且不只用於 payload**：`computer`／`printer`／`drive` 同時是佇列 `events.path_type` 的列值、以及事件 ID 第三段（`id_token|usage_date|path_type`）的組成。改 Agent 等於同時改動事件 ID 值域與既有佇列檔內容；改 DB 端只是調整一個列舉約束，當時無資料、成本趨近零。
+    - **兩套命名皆非完美，差異不足以支撐轉換成本**：`cloud` 較不綁定廠商，但欄位名本就是 `drive_usage_gb`／`drive_trash_gb`，`cloud` 與之並不一致；反之 `drive` 與欄位前綴一致，而 `computer` 與 `pc_*` 前綴不一致。兩者各有一處不對齊，語意上無歧義，故取「不必翻譯」者。
   - **附帶效益**：`path_type` 落庫後，[D10] 的分路徑趨勢分析、以及「某員工某路徑最近是否正常回報」的稽核查詢皆可直接查詢，不需由欄位樣態反推。
 
 - **[D13] Eco-Agent 三條路徑一律改走 HTTPS，路徑 A／B 不再走 MQTT**（v0.20）：原設計路徑 A（電腦）／B（印表機）走 MQTT、路徑 C（雲端）走 HTTPS，屬同一顆 SVS 內的協定分裂。v0.20 統一為全 HTTPS，理由如下：
@@ -407,7 +411,7 @@ Eco-Agent 為無人值守背景程式，身份綁定採「**一次綁定、長�
   - **連帶影響**：第 2、3 節協定表與分流敘述、4.4 路徑表協定欄與 payload 段（topic → REST 端點）、4.4.2 撤銷機制（原生成立）、5.1 寫入策略（分 MQTT／HTTPS 兩軌）與 P2／P3 工作項、5.2 數據面職責與配置參數表、技術堆疊 Desktop Agent 列（移除 MQTT client 依賴）皆已同步更新。
 - **[D14] `DIGITAL_USAGE` 冪等去重定案：補 `collected_at` 勝出規則、`device_id` 納入唯一鍵（雲端路徑除外）**（v0.20）：[D12] 定的唯一鍵（`employee_id`, `usage_date`, `path_type`）有兩個缺口，v0.20 一併補齊。
   - **缺口一：無法判定同日先後（對應原 (3)）**。路徑 A／C 送的是**當日累計值**、後到覆蓋先到；重送的舊封包若晚於新封包抵達，會把較新的累計值蓋回舊值。原 payload 僅有 `usage_date`（日期粒度），同日兩筆無從比較。**解法**：payload 與 `DIGITAL_USAGE` 皆補 `collected_at`（Agent 採集時間戳，UTC），upsert 加條件 `WHERE EXCLUDED.collected_at > digital_usage.collected_at`。用 Agent 端時間戳而非後端接收時間，因為要比較的是「哪一次採集較新」而非「哪一個封包先到」——後者正是亂序問題本身。
-  - **缺口二：鍵粒度與事件 ID 粒度錯位（對應原 (5)）**。4.4.3 事件 ID 的第一段 `id_token` 依 4.4.2 屬**每台裝置一枚**（裝置粒度），而落庫唯一鍵第一段 `employee_id` 屬**人**的粒度。一員工綁兩台電腦（辦公室桌機＋BYOD 筆電，於本專案 BYOD 定位下屬正常情境）同日各送 `path_type=pc`：Agent 端為兩個相異事件 ID（不重複），落庫卻撞同一鍵，後到者覆蓋先到者，等同吃掉一台電腦的使用量。**解法**：`DIGITAL_USAGE` 補 `device_id` FK 並納入唯一鍵，讓 DB 鍵粒度追上事件 ID 本就有的粒度。
+  - **缺口二：鍵粒度與事件 ID 粒度錯位（對應原 (5)）**。4.4.3 事件 ID 的第一段 `id_token` 依 4.4.2 屬**每台裝置一枚**（裝置粒度），而落庫唯一鍵第一段 `employee_id` 屬**人**的粒度。一員工綁兩台電腦（辦公室桌機＋BYOD 筆電，於本專案 BYOD 定位下屬正常情境）同日各送 `path_type=computer`：Agent 端為兩個相異事件 ID（不重複），落庫卻撞同一鍵，後到者覆蓋先到者，等同吃掉一台電腦的使用量。**解法**：`DIGITAL_USAGE` 補 `device_id` FK 並納入唯一鍵，讓 DB 鍵粒度追上事件 ID 本就有的粒度。
   - **但 `device_id` 不可一律納入——雲端路徑必須排除**：三條路徑的「資料本質粒度」不同。路徑 A（電腦）為 **per-device**（兩台電腦各自耗電，分列加總正確）；路徑 B（印表機）為 **per-printer**，兩台電腦各接不同印表機則加總正確；路徑 C（雲端）為 **per-account**——同一員工的兩台裝置查的是**同一個 Google 帳號**的 `usageInDrive`，會回傳同一個值，分列加總即憑空多算一倍。故雲端路徑的唯一鍵維持三段、不含 `device_id`。
   - **實作以 partial unique index 表達，不用單一四段 constraint**：雲端列的 `device_id` 為 NULL，而 PostgreSQL 預設把 NULL 視為**互不相等**——單一四段 unique constraint 會讓雲端路徑的去重**靜默失效**（不報錯、只是同員工同日可插入無限多列雲端資料）。故改以兩個 partial unique index 分別表達兩種鍵粒度（SQL 見 5.1）。（PG 15+ 亦可改用 `UNIQUE NULLS NOT DISTINCT` 單一約束；仍採 partial index，因其把「鍵粒度依路徑而異」顯式寫進 schema，可自我文件化。）
   - **`employee_id` 保留於列上、不改為靠 join 動態推導**：加入 `device_id` 後 `employee_id` 在功能上可經 `DEVICE_BINDING` 推導，看似冗餘。但裝置可重新綁定給不同員工（離職轉交、換人使用），若歸戶靠 join 推導，裝置一轉手**歷史資料的歸戶會被追溯改寫**。存為快照才能凍結「當時算在誰頭上」。（與 4.2 `WASTE_EVENT` 靠 `session_id` join 才知是誰的作法相反，因 session 為一次性、不會轉手，取捨基礎不同。）
@@ -470,12 +474,12 @@ Eco-Agent 為無人值守背景程式，身份綁定採「**一次綁定、長�
     -- 電腦／印表機：per-device，一裝置一列，員工層碳排以加總取得
     CREATE UNIQUE INDEX uq_digital_usage_device ON digital_usage
       (employee_id, usage_date, path_type, device_id)
-      WHERE path_type IN ('pc', 'printer');
+      WHERE path_type IN ('computer', 'printer');
 
     -- 雲端：per-account，同員工多裝置查得同值，納入 device_id 會重複計算
     CREATE UNIQUE INDEX uq_digital_usage_account ON digital_usage
       (employee_id, usage_date, path_type)
-      WHERE path_type = 'cloud';
+      WHERE path_type = 'drive';
     ```
 
     **不可改用單一四段 unique constraint**：雲端列的 `device_id` 為 NULL，PostgreSQL 預設視 NULL 互不相等，四段鍵會使雲端路徑去重**靜默失效**（不報錯、只重複計算）。PG 15+ 可改用 `UNIQUE NULLS NOT DISTINCT` 達同等效果，仍採 partial index，因其把鍵粒度差異顯式寫入 schema。
@@ -586,7 +590,7 @@ Eco-Agent 為無人值守背景程式，身份綁定採「**一次綁定、長�
 - [4.4][已決議] ~~Eco-Agent 綁定碼短效時長、Access/Refresh Token 期限與輪換策略~~ → **`bindingCodeTTL` 5 分鐘、Access Token 1 小時、Refresh Token 90 天（到期重綁、不輪換），詳見 4.4.4**。綁定碼儲存於 `BINDING_CODE` 表（詳見 4.4.2、ERD）。
 - [4.4][已決議] ~~Eco-Agent 撤銷狀態的回傳時機與離線撤銷延遲容忍度~~ → **採每次上傳夾帶（不另做心跳）；離線撤銷延遲上界 ≈ `maxAge`（24h），延遲期間裝置本就送不出資料，可接受，詳見 4.4.2**。
 - [4.4][已決議] ~~Eco-Agent 上傳觸發參數（computerUsageRecordInterval、driveQuotaInterval、累積量門檻、最長滯留時數）~~ → **已定案值詳見 4.4.4**（本地佇列儲存選型 SQLite vs append-only 檔仍待實測；唯一事件 ID 組成鍵見 [D12]，後端冪等去重策略已於 v0.20 與 5.1 對齊完畢，見下方 [4.4/5.1][已決議] 項）。
-- [4.4][已決議] ~~`DIGITAL_USAGE` 如何區分三條感測路徑、`path_type` 由誰決定~~ → **採方案 A「一路徑一列」**：新增 `path_type`（`pc`／`printer`／`cloud`），唯一鍵 =（`employee_id`, `usage_date`, `path_type`）（**v0.20 [D14] 已將 `pc`／`printer` 兩路徑之鍵擴為四段、加入 `device_id`**）；`path_type` **由 Agent 明送、不由後端從欄位樣態推斷**（零值與 NULL 難分辨、推斷規則脆化、與冪等鍵不自洽、Agent 本就知道）。`factor_id`／`co2e_kg` 屬後端寫入、不在 Agent payload。詳見 4.4 決策記錄 [D12]；ERD 已同步補 `path_type`、`drive_trash_gb`。
+- [4.4][已決議] ~~`DIGITAL_USAGE` 如何區分三條感測路徑、`path_type` 由誰決定~~ → **採方案 A「一路徑一列」**：新增 `path_type`（`computer`／`printer`／`drive`），唯一鍵 =（`employee_id`, `usage_date`, `path_type`）（**v0.20 [D14] 已將 `computer`／`printer` 兩路徑之鍵擴為四段、加入 `device_id`**）；`path_type` **由 Agent 明送、不由後端從欄位樣態推斷**（零值與 NULL 難分辨、推斷規則脆化、與冪等鍵不自洽、Agent 本就知道）。`factor_id`／`co2e_kg` 屬後端寫入、不在 Agent payload。詳見 4.4 決策記錄 [D12]；ERD 已同步補 `path_type`、`drive_trash_gb`。
 - [4.4/5.1][已決議] ~~後端冪等去重策略與 5.1 批次寫入對齊（原五項待釐清）~~ → **五項於 v0.20 全數定案**，4.4.3 與 5.1 的交接介面已明訂。逐項結果：
   - **(1) 去重層級** → **兩層並用**：應用層收批後依鍵摺疊，DB 層以 unique index 作最後防線（P3 多實例後尤為必要）。規格見 5.1「`DIGITAL_USAGE` 冪等去重」。
   - **(2) 單一批次內同鍵衝突** → **後端收批後先在記憶體依鍵摺疊（同鍵只留 `collected_at` 最新一筆）再組 upsert 語句**，避開 PostgreSQL `command cannot affect row a second time`。列為必要步驟而非最佳化。

@@ -51,16 +51,48 @@ type Sender interface {
 	Send(ctx context.Context, b Batch) (Response, error)
 }
 
-// wire 格式（去識別化：不含姓名/Email，只有 id_token 與量值 payload）。
-type wireEvent struct {
-	EventID  string         `json:"event_id"`
-	PathType string         `json:"path_type"`
-	Payload  map[string]any `json:"payload"`
-}
+// wire 格式（去識別化：不含姓名/Email，只有 id_token 與量值）。
+//
+// 每筆為**扁平記錄**（v20 §4.4）：共同欄位 usage_date／path_type／collected_at 與該路徑量值
+// 同層，不另包一層 payload 物件。共同欄位屬冪等唯一鍵與勝出判定所需，與量值同層可讓後端
+// 無須先進入巢狀結構即可分派與去重。
+//
+//   - usage_date：該筆用量所屬日期（YYYY-MM-DD），唯一鍵組成。
+//   - path_type：由 Agent 明送、不由後端從欄位樣態推斷（[D12]）；值域與後端
+//     DIGITAL_USAGE.path_type 一致，兩端無翻譯層。
+//   - collected_at：Agent 端採集時間戳（UTC，RFC3339Nano），依 [D14] 上送。路徑 A／C 送的是
+//     當日累計值、後到覆蓋先到，重送的舊封包若晚於新封包抵達會把較新的值蓋回舊值；後端據此欄
+//     以 `EXCLUDED.collected_at > digital_usage.collected_at` 判定勝出。用 Agent 端時間戳而非
+//     後端接收時間，因為要比較的是「哪一次採集較新」而非「哪一個封包先到」。
+//
+// employee_id 與 device_id 皆不上送（[D14]）——Agent 只持有 id_token，後端以其查
+// DEVICE_BINDING 即同時解出兩者，故 [D14] 將 device_id 納入唯一鍵一事對 Agent payload 零改動。
+
+// 共同欄位的 JSON 鍵。攤平時最後寫入，確保其值恆取自 Event 的專屬欄位，
+// 不會被 payload 內的同名鍵蓋掉（唯一鍵欄位不可由量值 map 決定）。
+const (
+	fieldEventID     = "event_id"
+	fieldPathType    = "path_type"
+	fieldUsageDate   = "usage_date"
+	fieldCollectedAt = "collected_at"
+)
 
 type wireBody struct {
-	IDToken string      `json:"id_token"`
-	Events  []wireEvent `json:"events"`
+	IDToken string           `json:"id_token"`
+	Events  []map[string]any `json:"events"`
+}
+
+// wireEventOf 把一筆佇列事件攤平為單層 JSON 物件。
+func wireEventOf(e queue.Event) map[string]any {
+	m := make(map[string]any, len(e.Payload)+4)
+	for k, v := range e.Payload {
+		m[k] = v
+	}
+	m[fieldEventID] = e.ID
+	m[fieldPathType] = string(e.PathType)
+	m[fieldUsageDate] = e.UsageDate
+	m[fieldCollectedAt] = e.CollectedAt.UTC().Format(time.RFC3339Nano)
+	return m
 }
 
 // MockHTTPSender 打 mock HTTP 端點（§7）。傳輸形狀與真實 HTTPS 上傳一致（POST JSON、
@@ -85,11 +117,7 @@ func NewMockHTTPSender(url string) *MockHTTPSender {
 func (s *MockHTTPSender) Send(ctx context.Context, b Batch) (Response, error) {
 	body := wireBody{IDToken: b.IDToken}
 	for _, e := range b.Events {
-		body.Events = append(body.Events, wireEvent{
-			EventID:  e.ID,
-			PathType: string(e.PathType),
-			Payload:  e.Payload,
-		})
+		body.Events = append(body.Events, wireEventOf(e))
 	}
 	buf, err := json.Marshal(body)
 	if err != nil {

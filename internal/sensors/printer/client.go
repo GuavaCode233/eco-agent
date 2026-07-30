@@ -12,7 +12,7 @@
 // 尚未落地（後續子項，見 CLAUDE.md §2 Step 3 表）：
 //   - 3.2 感測模式：page counter 無推播 → 只能輪詢；沿用 Step 2 的持久化時間戳到期判斷
 //     （lastPrinterPollAt，同掛 checkInterval），不可用絕對計時器；
-//   - 3.3 能耗換算與送出：payload {date, print_pages}，走 HTTPS（[D13]，現階段 mock 送出）；
+//   - 3.3 能耗換算與送出：payload {usage_date, print_pages}，走 HTTPS（[D13]，現階段 mock 送出）；
 //   - 3.4 BYOD 摩擦點：啟動時檢查與印表機同網段的連通性，不通則跳過並記 log。
 package printer
 

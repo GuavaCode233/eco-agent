@@ -37,6 +37,11 @@
 - **去識別化**：上傳前打包時**移除姓名/Email，只保留員工 ID Token**。Agent 全程只持有不可逆 token，不直接持有員工 ID。
 - **傳輸協定**：三條路徑（A 電腦／B 印表機／C 雲端）**一律走 HTTPS 直進後端 REST，Agent 不連線 MQTT Broker**（v20 §4.4 **[D13]**，v0.20 定案；原「A／B 走 MQTT」之設計已廢止，協定分流結構已移除）。理由：「後端回 200 才清佇列」在 MQTT 上不成立（PUBACK 由 Broker 而非後端發出），且撤銷（`401/403`）與配置版本號夾帶皆需 HTTP 回應語意。**現階段實際送出仍先 mock（見 §7）**。
 - **憑證保護**：Refresh Token 存系統金鑰庫（Windows DPAPI／macOS Keychain），**不寫純文字檔**。現階段 token 為 mock 常數，但**存取介面要照金鑰庫抽象寫**，日後換真值不改結構。
+- **上傳 payload 形狀（v20 §4.4 [D12]／**[D14]**）**：每筆為**扁平記錄**——共同欄位與該路徑量值**同層**，不另包一層 `payload` 物件（共同欄位屬冪等唯一鍵與勝出判定所需，同層可讓後端無須先進入巢狀結構即可分派與去重）。共同欄位有三個：
+  - `usage_date`：該筆用量所屬日期（`YYYY-MM-DD`），唯一鍵組成。與 `collected_at` 分工明確——本欄是「哪一天的用量」（日期粒度），後者是「何時採集到」（時刻粒度），兩者不可混用。
+  - `path_type`：列舉 `computer`／`printer`／`drive`（值域即 `queue.PathType`，DB `DIGITAL_USAGE.path_type` 已對齊此值域，故兩端無翻譯層），**由 Agent 明送、不由後端從欄位樣態推斷**（[D12]）。理由：零值與 NULL 難分辨（`print_pages = 0`、`drive_trash_gb = 0` 皆為合法資料）、推斷規則隨欄位演進而脆化、且 `path_type` 本身即冪等唯一鍵組成，用推導值當鍵等於讓去重正確性依賴推導規則不出錯。
+  - `collected_at`：**Agent 端採集時間戳（UTC，RFC3339Nano）**（[D14]）。路徑 A／C 送的是「當日累計值」、後到覆蓋先到，重送的舊封包若晚於新封包抵達會把較新的累計值蓋回舊值；後端以 `EXCLUDED.collected_at > digital_usage.collected_at` 判定勝出。用 Agent 端時間戳而非後端接收時間，因為要比較的是「哪一次採集較新」而非「哪一個封包先到」。**同一事件 ID 每次 upsert 都要更新此戳**（與佇列的 `created_at` 相反——後者固定於首次入列，供 `maxAge` 正確計算滯留時間）。
+  - `employee_id` 與 `device_id` **皆不在 payload 內**：Agent 只持有 `id_token`，後端以其查 `DEVICE_BINDING` 即同時解出兩者。故 [D14] 將 `device_id` 納入 `DIGITAL_USAGE` 唯一鍵一事，屬純後端／ERD 改動，**對 Agent payload 零改動**。
 
 ### 建議專案結構（可依 Go 慣例調整，但職責分離要保留）
 ```
@@ -90,7 +95,7 @@ eco-agent/
 |---|------|------|------|
 | 1.1 | `internal/platform`（活動偵測） | 封裝 Windows `GetLastInputInfo()` 與 macOS `IOHIDGetModifierLockState()`，回傳「距上次輸入的間隔」；macOS 需 Accessibility 授權，啟動時檢查並給引導訊息 | ✅ |
 | 1.2 | CPU 使用率（跨平台） | 用 `gopsutil`（`cpu.Percent`）取即時 CPU 使用率，Windows/macOS 一致介面、免特殊權限；併入同一輪詢週期取樣 | ✅ |
-| 1.3 | `internal/sensors/computer`（active/idle 分態） | 每 `computerUsageRecordInterval`（60 秒）輪詢，依「距上次輸入間隔」是否超過閾值判該區間為 **active／idle**，分別累計時數並記平均 CPU 使用率；**Agent 不算能耗**，只 `Enqueue` 原始量。Payload：`date`、`pc_active_hours`、`pc_idle_hours`、`pc_avg_cpu_util`、`cpu_model`（取代舊 `pc_tdp_w`） | ✅ |
+| 1.3 | `internal/sensors/computer`（active/idle 分態） | 每 `computerUsageRecordInterval`（60 秒）輪詢，依「距上次輸入間隔」是否超過閾值判該區間為 **active／idle**，分別累計時數並記平均 CPU 使用率；**Agent 不算能耗**，只 `Enqueue` 原始量。量值：`pc_active_hours`、`pc_idle_hours`、`pc_avg_cpu_util`、`cpu_model`（取代舊 `pc_tdp_w`）＋共同欄位 `usage_date`／`path_type`／`collected_at`（同層扁平，見 §1） | ✅ |
 | 1.4 | sleep/喚醒處理 | sleep/hibernate/關機時 Agent 被掛起、不計費（本無記錄，其低耗電自然不進帳）；喚醒後以 **wall-clock 時間戳差分**辨識掛起空白（間隔遠大於輪詢區間），該段不計 active/idle | ✅ |
 | 1.5 | 即時功耗 fallback（預留、不實作） | Intel RAPL／Apple `powermetrics` 更準但需權限、不跨平台、BYOD 多不可行；**結構預留、現階段不實作**，標 `// TODO(backend): 即時功耗覆蓋（RAPL/powermetrics）作為精度增強` | ✅ |
 | 1.6 | 流量量特性 | 關機期間無時數可採，跳過即可、**不需補查**（不套用路徑 C 的 deadline-check） | ✅ |
@@ -107,7 +112,7 @@ eco-agent/
 | 2.2 | 觸發模型（時間戳） | 不用絕對計時器；用**持久化時間戳 `lastDriveQuotaCheckAt`**（與佇列同一份 SQLite/落磁碟，見 `queue.SetState/GetState`）；**掛 `checkInterval`（60 秒巡檢）**，判斷 `now() - lastDriveQuotaCheckAt >= driveQuotaInterval`（24h）才查、`Enqueue`、更新時間戳。掛巡檢而非 `computerUsageRecordInterval`（職責分離）。查詢／入列失敗不更新時間戳，下次巡檢自然重試 | ✅ |
 | 2.3 | 冷啟動 | 時間戳不存在（`GetState` ok=false）或無法解析視為「已到期」，第一次巡檢即查並寫入時間戳 | ✅ |
 | 2.4 | 開機補查 | 關機數日後開機，若距上次查詢已超過 `driveQuotaInterval`，開機後首次巡檢自動補查——與「開機後檢查」合流（`Run` 啟動先立即巡檢一次），**無需另寫** | ✅ |
-| 2.5 | 能耗換算與送出 | Agent 純感測、只送原始量（比照路徑 A）：Payload `{date, drive_usage_gb, drive_trash_gb}`（`drive_usage_gb` = `usageInDrive` 換算 GB，v20 [D8]；否決 `usage`／`limit`），能耗（儲存量GB × PUE × 電力係數）由後端計算；走 HTTPS（三路徑一律 HTTPS，見 [D13]；由 uploader 統一送出，現 mock）。`drive_trash_gb`（= `usageInDriveTrash`，減碳激勵任務用「可立即釋放的儲存能耗」）**已啟用**一併送出 | ✅ |
+| 2.5 | 能耗換算與送出 | Agent 純感測、只送原始量（比照路徑 A）：量值 `{drive_usage_gb, drive_trash_gb}`＋共同欄位 `usage_date`／`path_type`／`collected_at`（同層扁平，見 §1）（`drive_usage_gb` = `usageInDrive` 換算 GB，v20 [D8]；否決 `usage`／`limit`），能耗（儲存量GB × PUE × 電力係數）由後端計算；走 HTTPS（三路徑一律 HTTPS，見 [D13]；由 uploader 統一送出，現 mock）。`drive_trash_gb`（= `usageInDriveTrash`，減碳激勵任務用「可立即釋放的儲存能耗」）**已啟用**一併送出 | ✅ |
 | 2.V | 獨立驗證 | `cmd/drive-sensor-demo`：縮短 `driveQuotaInterval` 觀察到期即查；預置很久以前時間戳 → 啟動即補查；冷啟動（無時間戳）第一次即查 | ✅ |
 | 2.M | 合併驗證 | A + C 同跑，各自節奏、共用同一佇列與上傳觸發 | ✅ |
 
@@ -119,7 +124,7 @@ eco-agent/
 |---|------|------|------|
 | 3.1 | `internal/sensors/printer`（SNMP） | SNMP（UDP 161）查 OID `1.3.6.1.2.1.43.10.2.1.4`（page counter 累計值），前後相減得增量頁數，以 mock ID Token 歸戶 | ✅ |
 | 3.2 | 感測模式（時間戳） | page counter 無推播 → 只能**輪詢**；用 `printerPollInterval`（暫定 300 秒、標 TODO）；同屬狀態量長輪詢，**沿用 Step 2 時間戳到期判斷**（`lastPrinterPollAt`，同掛 `checkInterval`） | ✅ |
-| 3.3 | 能耗換算與送出 | 能耗 = 增量頁數 × 紙張生命週期係數；Payload：`date`、`print_pages`；走 HTTPS（[D13]，現 mock 送出） | ✅ |
+| 3.3 | 能耗換算與送出 | 能耗 = 增量頁數 × 紙張生命週期係數；量值：`print_pages`＋共同欄位 `usage_date`／`path_type`／`collected_at`（同層扁平，見 §1）；走 HTTPS（[D13]，現 mock 送出） | ✅ |
 | 3.4 | BYOD 摩擦點 | SNMP 需與印表機同網段——啟動時檢查連通性，不通則跳過並記 log，不使 Agent 卡住 | ✅ |
 | 3.V | 獨立驗證 | 對可 SNMP 的印表機（或本機 mock SNMP responder）輪詢，確認增量頁數正確、歸戶到 mock ID Token | ✅ |
 | 3.M | 合併驗證 | A + C + B 三路徑齊跑，單一佇列匯集、四重觸發統一上傳，端到端 demo | ✅ |

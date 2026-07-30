@@ -7,7 +7,7 @@
 // 尚未落地（後續子項，見 CLAUDE.md §2 Step 2 表）：
 //   - 2.2 觸發模型：以持久化時間戳 lastDriveQuotaCheckAt + checkInterval 到期判斷輪詢
 //     （不可用 sleep(24h) 絕對計時器）；
-//   - 2.5 能耗換算與送出：能耗 = 儲存量(GB) × PUE × 電力係數，payload {date, drive_usage_gb}，
+//   - 2.5 能耗換算與送出：能耗 = 儲存量(GB) × PUE × 電力係數，payload {usage_date, drive_usage_gb}，
 //     走 HTTPS 直進後端（現階段 mock 送出）。
 //
 // 本檔僅提供「取用量」的 API 客戶端與其抽象介面，供 2.2 感測器注入。

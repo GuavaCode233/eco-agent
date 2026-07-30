@@ -101,6 +101,34 @@ A（電腦，真實取樣）、C（雲端，有憑證就真串 Drive API）、B�
 
 任一路徑不可用只降級該路徑，其餘照跑——設了但當下連不到的印表機亦然（只記 log、不入列，不影響 A/C）。
 
+## 上傳 payload 格式（v20 §4.4 [D12] / [D14]）
+
+單次 HTTPS POST 送出一批（上限 `uploadBatchMax`），已去識別化 — 只帶 `id_token`，不帶姓名/Email。每筆為**扁平記錄**：共同欄位與該路徑量值同層，不另包一層 `payload` 物件。
+
+```jsonc
+{
+  "id_token": "<per-device ID Token>",
+  "events": [
+    {
+      "event_id":        "<id_token>|<usage_date>|<path_type>",  // 穩定鍵，供後端冪等 upsert 去重
+      "path_type":       "computer",                             // 由 Agent 明送，不由後端推斷（[D12]）
+      "usage_date":      "2026-07-16",                           // 用量所屬日期，唯一鍵組成
+      "collected_at":    "2026-07-16T09:30:15.123Z",             // Agent 採集時間戳（UTC，[D14]）
+      "pc_active_hours": 1.5,                                    // ↓ 以下為該路徑量值
+      "pc_idle_hours":   0.25,
+      "pc_avg_cpu_util": 17.4,
+      "cpu_model":       "AMD Ryzen 9"
+    }
+  ]
+}
+```
+
+- **`path_type`（[D12]）** — 列舉 `computer`／`printer`／`drive`。值域與後端 `DIGITAL_USAGE.path_type` 一致，**兩端無翻譯層**：此欄是冪等唯一鍵組成，若兩端詞彙不同而靠映射轉換，映射寫錯或漏改時去重會靜默失效而非報錯。
+- **`usage_date` vs `collected_at`** — 前者是「哪一天的用量」（日期粒度、唯一鍵組成），後者是「何時採集到」（時刻粒度、亂序勝出判定），兩者不可混用。
+- **`collected_at`（[D14]）** — 路徑 A／C 送的是「當日累計值」、後到覆蓋先到；重送的舊封包若晚於新封包抵達，會把較新的累計值蓋回舊值。後端以 `EXCLUDED.collected_at > digital_usage.collected_at` 判定勝出。取 **Agent 端**時間戳而非後端接收時間，因為要比較的是「哪一次採集較新」而非「哪一個封包先到」。同一事件 ID 每次 upsert 都會更新此戳（與佇列 `created_at` 相反 — 後者固定於首次入列，供 `maxAge` 正確計算滯留時間）。
+- **`employee_id`／`device_id` 不上送** — Agent 只持有 `id_token`，後端以其查 `DEVICE_BINDING` 即同時解出兩者。故 [D14] 將 `device_id` 納入 `DIGITAL_USAGE` 唯一鍵一事，對 Agent payload 零改動。
+- 各路徑量值：A `pc_active_hours`／`pc_idle_hours`／`pc_avg_cpu_util`／`cpu_model`；B `print_pages`；C `drive_usage_gb`／`drive_trash_gb`。一律只送原始量，能耗換算全在後端（[D7]）。
+
 ## 「等後端」標記清單（§7 / §8.6）
 
 暫以常數/mock 代替、日後要接後端的位置統一加標記，可 grep 一次列出：
