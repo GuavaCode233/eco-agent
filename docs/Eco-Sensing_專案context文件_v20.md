@@ -25,12 +25,12 @@
 | 差旅核算 | 三軌上傳（高鐵票／計程車紙本／App 截圖），OCR＋GPT-4o NER，員工確認後送出 | 4.1 |
 | 廢棄物 | 員工掃桶上 QR 開 session → 投入 → App 點投入完畢；樹莓派匿名上傳、後端配對歸戶（A＋C＋D＋G 組合） | 4.2 |
 | 電梯 | 感測端採**被動 NFC tag**（各樓層電梯廳，不供電／不接觸電梯控制系統，主動式 ESP32 降級為未來增強路徑，[D5]）；手機掃描進出樓層、HTTPS 直送後端（不經 MQTT）；共乘採方案 B 固定單人分攤值（樓層差 × 上/下行單人係數，不感測人數、不拆總耗電），激勵帳與盤查帳分離 | 4.3 |
-| Eco-Agent | Go 開發；方案 B 手機掃碼綁定＋雙 token；本地持久化佇列＋四重觸發上傳；集中配置參數已定案（4.4.4）；電腦路徑改使用率加權、Agent 純感測後端計算（4.4 [D7]）；雲端儲存量取 `usageInDrive`、`usageInDriveTrash` 拆作激勵任務（4.4 [D8]）；雲端 PUE 採 Google fleet-wide 均值、每GB儲存能耗強度以硬碟規格反推（4.4 [D9]，係數值待查證）；路徑 C 應用場景四類盤點、趨勢/教育可放心做、讀檔案清單類待隱私決策（4.4 [D10]）；印表機 SNMP 五參數隨綁定本地設定、不走全域下發（4.4.2、[D11]）；`DIGITAL_USAGE` 採一路徑一列、`path_type` 由 Agent 明送（[D12]，ERD 已補 `path_type`／`drive_trash_gb`） | 4.4 |
+| Eco-Agent | Go 開發；方案 B 手機掃碼綁定＋雙 token；本地持久化佇列＋四重觸發上傳；集中配置參數已定案（4.4.4）；電腦路徑改使用率加權、Agent 純感測後端計算（4.4 [D7]）；雲端儲存量取 `usageInDrive`、`usageInDriveTrash` 拆作激勵任務（4.4 [D8]）；雲端 PUE 採 Google fleet-wide 均值、每GB儲存能耗強度以硬碟規格反推（4.4 [D9]，係數值待查證）；路徑 C 應用場景四類盤點、趨勢/教育可放心做、讀檔案清單類待隱私決策（4.4 [D10]）；印表機 SNMP 五參數隨綁定本地設定、不走全域下發（4.4.2、[D11]）；`DIGITAL_USAGE` 採一路徑一列、`path_type` 由 Agent 明送（[D12]，ERD 已補 `path_type`／`drive_trash_gb`）；**三路徑全改 HTTPS、Agent 不再連 MQTT Broker**（[D13]）；冪等去重定案——`collected_at` 勝出規則、`device_id` 納入唯一鍵（雲端路徑除外）（[D14]，ERD 已補 `device_id`／`collected_at`／`DEVICE.display_name`） | 4.4 |
 | 印表機歸戶 | 優先開發「個人專屬機（Eco-Agent SNMP 輪詢歸戶）」與「手動上傳用紙量（App 主動感測、須搭誘因）」；共用機的 Print Server Log 與 Pull Printing API 列為可行、待實作測試 | 4.4、7 |
 | 綁定碼儲存 | 後端 `BINDING_CODE` 表持久化短效一次性碼（5 分鐘 TTL、消費即失效、過期即失效） | 4.4.2 |
 | QR 辨識 | 全系統統一 custom scheme URI；掃描一律開/用 App，App 依 URI host/path 分流動作 | 4.5 |
-| Agent 撤銷 | 每次上傳夾帶撤銷狀態（不另做心跳），`401/403` 即自清憑證；離線延遲上界 ≈ maxAge | 4.4.2 |
-| 後端 | FastAPI＋Supabase（PostgreSQL），一律走 connection pooler；MQTT consumer 批次寫入；讀取端快取 | 5.1 |
+| Agent 撤銷 | 每次上傳夾帶撤銷狀態（不另做心跳），`401/403` 即自清憑證；離線延遲上界 ≈ maxAge；上傳全走 HTTPS 後此回應通道原生成立（[D13]） | 4.4.2 |
+| 後端 | FastAPI＋Supabase（PostgreSQL），一律走 connection pooler；寫入分兩軌——MQTT consumer 批次寫入（廢棄物）／HTTPS 批次端點（Eco-Agent）；`DIGITAL_USAGE` 冪等去重採應用層摺疊＋DB partial unique index 兩層；讀取端快取 | 5.1 |
 | Controller | 自建輕量版，FastAPI 內管理模組（控制面／數據面邏輯分離）；配置經 MQTT retained＋HTTPS 夾帶雙通道下發 | 5.2 |
 | 開發階段 | Roadmap 第一～三步進行中；後端依 P1→P2→P3 推進，P1 未開始 | 6、5.1 |
 
@@ -66,7 +66,7 @@
 | 商務差旅碳核算 | Scope 3 Cat. 6（商務旅行） | 差旅里程、交通工具、碳排量 | HTTPS / REST API |
 | 辦公室廢棄物辨識 | Scope 1/2（含廢棄物處理） | 廢棄物類型、重量 | MQTT |
 | 電梯搭乘追蹤 | Scope 1/2（電力消耗） | 垂直交通電力、樓層移動 | HTTPS / REST API |
-| 數位能耗監測（Desktop Agent） | Scope 3 Cat. 8 / 辦公行為 | 電腦使用、列印頁數、雲端儲存 | MQTT / HTTPS |
+| 數位能耗監測（Desktop Agent） | Scope 3 Cat. 8 / 辦公行為 | 電腦使用、列印頁數、雲端儲存 | HTTPS / REST API |
 
 ---
 
@@ -74,14 +74,17 @@
 
 混合協定架構，依資料特性分流：
 
-### MQTT — 本地感測裝置資料上傳
-- 適用：廢棄物辨識（樹莓派 4B）、Desktop Agent（電腦/印表機）
+### MQTT — 無人值守 IoT 硬體的資料上傳與配置下發
+- 適用：廢棄物辨識（樹莓派 4B）
 - 特性：輕量、低耗電、適合高頻事件推送（封包最小 2 bytes）
 - Broker：Mosquitto（統一中介）
+- 兼作控制面通道：`config/bin/{id}` retained message 對樹莓派下發配置（見 5.2）
 
-### HTTPS / REST API — 呼叫外部第三方服務
-- 適用：差旅收據 OCR（GPT-4o）、Google Drive API v3、TDX 運輸 API、Google Maps API、電梯搭乘數據（手機 App → 後端）
-- 特性：加密傳輸、支援 OAuth 2.0、適合大型檔案（圖片）
+### HTTPS / REST API — 需雙向往返者與外部服務呼叫
+- 適用：差旅收據 OCR（GPT-4o）、Google Drive API v3、TDX 運輸 API、Google Maps API、電梯搭乘數據（手機 App → 後端）、**Eco-Agent 三條感測路徑全部**（v0.20 起，原走 MQTT 的路徑 A／B 一併改走 HTTPS，見 4.4 [D13]）
+- 特性：加密傳輸、支援 OAuth 2.0、適合大型檔案（圖片）；**具原生回應通道**，可承載「已落地」確認（`200`）、撤銷狀態（`401/403`）與配置版本號夾帶
+
+> **分流判準（v0.20 釐清）**：不以「是否為 IoT 裝置」分流，而以**是否需要後端的回應**分流。樹莓派為匿名單向推送（歸戶由後端配對 session 完成，不需回應），走 MQTT 得其輕量之利；Eco-Agent 需要「已落地確認 → 才可清本地佇列」「撤銷狀態」「配置版本號」三種回程資訊，走 HTTPS 才能一次滿足。詳見 4.4 [D13]。
 
 ---
 
@@ -173,9 +176,9 @@
   - **代價（已於規格段處理）**：被動 tag 依賴員工主動掃描兩次，可能產生只有進場、無出場的孤兒記錄，以逾時自動結算處理（同 4.2 廢棄物 session）。ESP32 唯一的真實優勢是「自動偵測、不靠員工自覺」，但該優勢在無法取得轎廂樓層資訊的前提下**無法兌現**，故不構成選它的理由。
   - **定位與既有設計一致**：與 4.4 [D6] 印表機「優先開發不依賴場域基礎設施的路徑、依賴基礎設施者列為可行待測」同構——主動式 ESP32 列為「若未來能取得電梯控制系統樓層介面時的增強路徑」，不納入現階段開發。
 
-### 4.4 數位能耗監測 Desktop Agent（Eco-Agent）（MQTT / HTTPS）
+### 4.4 數位能耗監測 Desktop Agent（Eco-Agent）（HTTPS）
 
-> 依賴：App 登入身份與 QR 掃碼能力（4.4.2 綁定）｜5.1 批次寫入與冪等去重｜5.2 集中配置服務（參數下發）｜系統金鑰庫（Windows DPAPI／macOS Keychain）
+> 依賴：App 登入身份與 QR 掃碼能力（4.4.2 綁定）｜5.1 HTTPS 批次上傳端點與冪等 upsert｜5.2 集中配置服務（參數下發）｜系統金鑰庫（Windows DPAPI／macOS Keychain）
 
 #### 規格（現行定案）
 
@@ -183,8 +186,8 @@
 
 | 路徑 | 對象 | 方法 | 協定 |
 |------|------|------|------|
-| A | 電腦使用 | Windows `GetLastInputInfo()` / macOS `IOHIDSystem`、`HIDIdleTime` 判活躍/閒置＋跨平台 CPU 使用率（`gopsutil`），每固定區間 `computerUsageRecordInterval` 輪詢；**Agent 只送原始量（active/idle 時數、平均使用率、CPU 型號），能耗由後端以使用率加權模型計算**（見「電腦能耗模型」） | MQTT |
-| B | 印表機（個人專屬機） | SNMP（UDP 161）查詢 OID `1.3.6.1.2.1.43.10.2.1.4`，前後頁數相減，以 Agent 綁定 employee_id 歸戶。共用機歸戶另循 Print Server Log／Pull Printing（可行、待實作測試）或改由 App 手動上傳用紙量（非本 Agent 路徑，屬使用者主動感測）——詳見決策記錄 [D6] | MQTT |
+| A | 電腦使用 | Windows `GetLastInputInfo()` / macOS `IOHIDSystem`、`HIDIdleTime` 判活躍/閒置＋跨平台 CPU 使用率（`gopsutil`），每固定區間 `computerUsageRecordInterval` 輪詢；**Agent 只送原始量（active/idle 時數、平均使用率、CPU 型號），能耗由後端以使用率加權模型計算**（見「電腦能耗模型」） | HTTPS |
+| B | 印表機（個人專屬機） | SNMP（UDP 161）查詢 OID `1.3.6.1.2.1.43.10.2.1.4`，前後頁數相減，以 Agent 綁定 employee_id 歸戶。共用機歸戶另循 Print Server Log／Pull Printing（可行、待實作測試）或改由 App 手動上傳用紙量（非本 Agent 路徑，屬使用者主動感測）——詳見決策記錄 [D6] | HTTPS |
 | C | 雲端儲存 | OAuth 2.0 授權，Google Drive API `about?fields=storageQuota`，取 `usageInDrive` 作為儲存量 × 每GB儲存能耗強度 × PUE（fleet-wide）（儲存量取值見 [D8]、係數取得見 [D9]） | HTTPS |
 
 **三條路徑的感測模式（輪詢 vs 事件觸發）**
@@ -209,13 +212,14 @@
   - **未來實作、測試（列為可行但待實作）**：共用印表機要歸戶到人須改用帶 user 欄位的來源——**Print Server Log**（逐工作帶送出者身份，天生事件式，可訂閱 Windows PrintService/Operational Event ID 307）或 **Pull Printing API**（刷卡列印，如 PaperCut，釋放前刷證驗證使身份與工作在源頭綁定）。兩者技術上皆可行、且「事件觸發＋歸戶」同時成立，但受限於實驗場域基礎設施前提，列為待實作與測試項。
 
 - **本地彙整與去識別化**：資料先寫入本機持久化佇列，於上傳前打包彙整——移除姓名/Email，僅保留員工 ID Token（符合個資合規）。上傳時機採多重觸發（不綁固定時刻），詳見 4.4.3。
-- **MQTT Payload**（topic: `digital/agent/{employee_id}`）：**每次上傳為「某員工某日某路徑」的一筆感測結果**，共同欄位為 `usage_date`、`path_type`（列舉 `pc`／`printer`／`cloud`，**由 Agent 明送、不由後端推斷**，見 [D12]），其餘欄位依 `path_type` 而定：
+- **上傳 Payload**（HTTPS `POST {base_url}/digital-usage/batch`，`Authorization: Bearer <Access Token>`，body 為筆陣列，單次筆數上限 `uploadBatchMax`）：**每筆為「某裝置某日某路徑」的一筆感測結果**，共同欄位為 `usage_date`、`path_type`（列舉 `pc`／`printer`／`cloud`，**由 Agent 明送、不由後端推斷**，見 [D12]）、`collected_at`（Agent 端採集時間戳，UTC，供亂序抵達勝出判定，見 [D14]），其餘欄位依 `path_type` 而定：
   - `path_type = pc`：pc_active_hours、pc_idle_hours、pc_avg_cpu_util、cpu_model
   - `path_type = printer`：print_pages
   - `path_type = cloud`：drive_usage_gb（取自 `usageInDrive`）、drive_trash_gb（取自 `usageInDriveTrash`，供激勵任務用，見 [D8]）
   （電腦路徑改送原始量——active/idle 時數、平均 CPU 使用率、CPU 型號——不再送 `pc_tdp_w`；能耗由後端計算。`factor_id`／`co2e_kg` 屬後端查係數計算後寫入，**不在 Agent payload 內**。）
+  - **`employee_id` 與 `device_id` 皆不在 payload 內**：Agent 只持有 `id_token`（4.4.2，per-device 一枚），後端以 `id_token` 查 `DEVICE_BINDING` 即**同時解出 `employee_id` 與 `device_id`** 二者並落庫。故 [D14] 將 `device_id` 納入唯一鍵一事，對 Agent payload 零改動（見 [D14]）。
 - **碳排換算（集中於後端）**：電力（電腦：使用率加權功率模型 `P_idle + 使用率 ×(P_active − P_idle)` × 時數 × 台電係數，`P_active` 由 CPU 型號查 TDP 表；未來可由 RAPL/powermetrics 即時功耗覆蓋）＋ 列印（頁數 × 紙張生命週期係數）＋ 雲端（`usageInDrive` GB × 每GB儲存能耗強度（kWh/GB/年，未含 PUE）× PUE（Google fleet-wide ~1.1）× 電力係數 × 時間比例；`usageInDriveTrash` 另計為「可釋放能耗」供激勵，見 [D8]、[D9]）。TDP 對照表、P_idle 比例、每GB儲存能耗強度、PUE、各項係數皆屬 `EMISSION_FACTOR`／係數配置，後端維護、不寫死於 Agent。
-- **注意**：Google Drive 數據走 HTTPS 直接進後端 REST API，**不經過 MQTT Broker**。
+- **傳輸協定（v0.20 定案）**：三條路徑**一律走 HTTPS 進後端 REST API，Eco-Agent 不再連線 MQTT Broker**（原路徑 A／B 走 MQTT 之設計於 v0.20 廢止，理由見 [D13]）。本專案 MQTT 因此僅存兩處用途：廢棄物樹莓派的資料上行（4.2）與 5.2 對樹莓派的 retained 配置下發。Eco-Agent 執行檔可移除 MQTT client 依賴（`paho.mqtt.golang`）。
 
 ##### 4.4.1 開發架構：Go
 
@@ -253,7 +257,7 @@ Eco-Agent 為無人值守背景程式，身份綁定採「**一次綁定、長�
   - **輪換策略：不啟用**——Refresh Token 90 天固定不變、到期即需重走綁定流程（重新掃碼）。輪換（每次續期換發新 Refresh、舊的作廢）帶來的複雜度與離線誤判風險，於數十人專題規模 > 收益，列為 P3 資安強化備選；主要威脅已由「每次上傳夾帶撤銷」覆蓋。
 - **員工端登出**（本機操作）：換機時於 Agent 點「解除綁定」→ 清本機憑證 + 通知後端標記解綁。
 - **企業端遠端登出 / 撤銷**（Web 後台）：員工離職、裝置遺失或異常時，IT 將該裝置標記 `revoked`。
-- **撤銷生效機制（採每次上傳夾帶，不另做心跳）**：Agent 每次 flush 上傳時，後端於回應夾帶有效性狀態；若已被撤銷則回 `401/403`，Agent 收到即**自我清除憑證（含金鑰庫 Refresh Token）、停止上傳**。此檢查搭既有上傳往返「搭便車」，與 4.4.3 上傳回應、5.2 配置版本號夾帶共用同一條回應通道，零額外通道。
+- **撤銷生效機制（採每次上傳夾帶，不另做心跳）**：Agent 每次 flush 上傳時，後端於回應夾帶有效性狀態；若已被撤銷則回 `401/403`，Agent 收到即**自我清除憑證（含金鑰庫 Refresh Token）、停止上傳**。此檢查搭既有上傳往返「搭便車」，與 4.4.3 上傳回應、5.2 配置版本號夾帶共用同一條回應通道，零額外通道。**（v0.20 註）**：本機制原即以 HTTP 語意書寫（`401/403`），在 v0.19 之前與「路徑 A／B 走 MQTT」相衝突——MQTT 無此回應語意，該通道實則不存在。v0.20 將三路徑全改 HTTPS 後（[D13]），此處敘述始為原生成立，無須另開回程通道。
   - **離線裝置撤銷延遲容忍度**：撤銷延遲 = 下次上傳觸發之前的時間，上界 ≈ 4.4.3 的 `maxAge`（24h，裝置有開機前提下）。離線期間裝置本就送不出資料，不造成資料正確性風險；真正要防的「重新上線後還能送」在其一上線 flush 即被 `401/403` 擋掉，故延遲可接受。
   - （備選，未採）開機/喚醒後先發輕量狀態查詢以提前撤銷檢查，列為 P3 韌性強化備選。
 
@@ -294,15 +298,20 @@ Eco-Agent 為無人值守背景程式，身份綁定採「**一次綁定、長�
 
 > **實作註記（Eco-Agent Step 1.3 觀察）**：各路徑採「狀態值輪詢／一天一筆累計事件」（事件 ID = `id_token + 日期 + 路徑類型`），每次輪詢以當日累計 upsert 覆蓋同一筆，故**單一路徑單日僅佔佇列 1 筆**。因此「累積達量（`thresholdCount`）」對**單一路徑單獨運作幾乎不會觸發**，該路徑實際靠「關機前 hook／開機後補送／最長滯留」送出；`thresholdCount` 要到**多路徑（A＋C＋B）齊跑、多筆匯集**時才成為主力觸發。此為狀態值輪詢模型的自然結果，非缺陷。
 
-**至少一次送達（At-least-once）**
+**至少一次送達（At-least-once，端到端成立）**
 
-- 佇列資料**僅在後端回 200 確認後才標記已上傳並清除**；上傳失敗（離線、後端不可用）則保留，下次觸發重試。
-- 每筆帶**唯一事件 ID**（可由 `id_token + 日期 + 路徑類型` 組出穩定鍵；其中「路徑類型」即 payload 的 `path_type`，**由 Agent 明送並落庫為 `DIGITAL_USAGE.path_type`**，後端據以 upsert，唯一鍵 =（`employee_id`, `usage_date`, `path_type`），見 [D12]），後端 **upsert／冪等去重**，重複送達不重複計算——複用 5.1 既有的 MQTT 批次寫入冪等基礎。
+- 佇列資料**僅在後端回 `200` 確認後才標記已上傳並清除**；上傳失敗（離線、後端不可用、逾時、`5xx`）則保留，下次觸發重試。
+- **此合約成立的前提是全程 HTTPS（v0.20 [D13]）**：`200` 由**後端於批次落地（upsert commit）之後**才回出，非由中介代發，故「收到 200」與「資料已在資料庫」等價，不存在「Agent 已清佇列、資料卻仍在後端記憶體」的破口。**後端不得先回 `200` 再非同步落地**——該作法會重新打開此破口，屬實作上的硬性約束（見 5.1）。
+- 每筆帶**唯一事件 ID**（`id_token + usage_date + path_type` 組出穩定鍵；其中「路徑類型」即 payload 的 `path_type`，**由 Agent 明送並落庫為 `DIGITAL_USAGE.path_type`**，見 [D12]）。後端以 `id_token` 查 `DEVICE_BINDING`，**同時解出 `employee_id` 與 `device_id`**，據以 upsert；落庫唯一鍵與事件 ID 的粒度對齊（見 [D14]）：
+  - `path_type = pc`／`printer`：（`employee_id`, `usage_date`, `path_type`, `device_id`）——一裝置一列，員工層碳排以加總取得。
+  - `path_type = cloud`：（`employee_id`, `usage_date`, `path_type`）——雲端儲存為**帳號層級事實**，同員工多台裝置查得同一數值，若納入 `device_id` 會憑空重複計算。
+- **亂序抵達的勝出規則**：每筆另帶 `collected_at`（Agent 端採集時間戳，UTC）。後端 upsert 僅當 `EXCLUDED.collected_at > digital_usage.collected_at` 時才更新，重送的舊封包不會蓋掉較新的值（見 [D14]）。原僅有 `usage_date`（日期粒度）不足以比較同日先後，故 v0.20 補此欄。
+- 重複送達不重複計算由 5.1 之兩層冪等機制保證（應用層依鍵摺疊 ＋ DB partial unique index），詳見 5.1「`DIGITAL_USAGE` 冪等去重」。
 
 **與既有設計的銜接**
 
 - 與 4.2 廢棄物 session「逾時自動結算孤兒事件」同一思路：不假設 happy path，為中斷保留兜底。
-- 與 4.4.2 撤銷機制天然整合：每次 flush 上傳都會收到後端回應，順帶夾帶撤銷狀態檢查（`401/403` 即自清憑證），一石二鳥。
+- 與 4.4.2 撤銷機制天然整合：每次 flush 上傳都會收到後端回應，順帶夾帶撤銷狀態檢查（`401/403` 即自清憑證），一石二鳥。**此整合以 HTTPS 為前提**（[D13]）：同一條回應通道一次承載「已落地確認」「撤銷狀態」「配置版本號」（5.2）三件事，三者共用零額外通道。
 - flush 間隔、累積量門檻、最長滯留時數等參數，屬 5.2 集中配置服務（`sensor_config`）可下發之 Eco-Agent 策略。
 
 ##### 4.4.4 集中配置參數（已定案）
@@ -389,6 +398,24 @@ Eco-Agent 為無人值守背景程式，身份綁定採「**一次綁定、長�
   - **欄位歸屬釐清**：Agent 上傳 = `id_token`（後端解析為 `employee_id`）＋ `usage_date` ＋ `path_type` ＋ 該路徑原始量；後端寫入 = `factor_id`、`co2e_kg`（依 5.1「Agent 純感測、碳排計算集中後端」與 [D7]，`factor_id` 係後端查 `EMISSION_FACTOR` 後才決定，Agent 無從得知，故不在 payload 內）。後端依 `path_type` **讀取明示值做分派**（決定查哪類係數），非推斷。
   - **附帶效益**：`path_type` 落庫後，[D10] 的分路徑趨勢分析、以及「某員工某路徑最近是否正常回報」的稽核查詢皆可直接查詢，不需由欄位樣態反推。
 
+- **[D13] Eco-Agent 三條路徑一律改走 HTTPS，路徑 A／B 不再走 MQTT**（v0.20）：原設計路徑 A（電腦）／B（印表機）走 MQTT、路徑 C（雲端）走 HTTPS，屬同一顆 SVS 內的協定分裂。v0.20 統一為全 HTTPS，理由如下：
+  - **「後端回 200 才清佇列」在 MQTT 上根本不成立**：4.4.3 的送達合約以 HTTP `200` 表述，但 MQTT 無此語意；QoS 1 的 PUBACK 由 **Broker** 而非後端發出。Agent 收到 Broker ack 即清本地佇列，資料卻可能仍在後端記憶體佇列未落地，此時後端崩潰即**永久遺失且 Agent 已無副本可重送**——「至少一次送達」在端到端層級有破口。改走 HTTPS 後，`200` 由後端於 commit 之後發出，收到即等價於已落地，破口自然消失。
+  - **回程通道本來就是必需品，MQTT 給不了**：4.4.2 撤銷機制（`401/403` 自清憑證）與 5.2 配置版本號夾帶，兩者皆以 HTTP 回應語意書寫、且皆設計為「搭上傳往返的便車」。若 A／B 續走 MQTT，這條通道必須另行實作（另開一條 HTTPS，或走 MQTT 反向 topic 自建 request/response 語意）——等於為了保住 MQTT 而額外造一條 HTTPS，協定數量不減反增。
+  - **MQTT 的優勢在此路徑用不上**：MQTT 的價值在極輕封包、高頻推送、大量無人值守裝置。而 Eco-Agent 依 4.4.3 實作註記為「狀態值輪詢／一天一筆累計事件」，**單一路徑單日僅佔佇列 1 筆**，上傳頻率極低、封包大小無關緊要；Agent 執行於有完整 TCP/TLS 堆疊的桌機而非受限硬體。以低頻上傳換取一條原生回應通道，取捨明顯。
+  - **並非否定 MQTT 於本專案的地位**：廢棄物樹莓派續走 MQTT（4.2）——其為匿名單向推送、歸戶由後端配對 session 完成、不需要任何回程資訊，恰是 MQTT 的適用場景；5.2 對樹莓派的 retained 配置下發亦保留，且仍是本專案最具 SDN 特徵的控制通道。故混合協定架構（第 3 節）依然成立，只是**分流判準由「是不是 IoT 裝置」修正為「需不需要後端的回應」**，判準更清楚。
+  - **否決的替代方案**：(a)「MQTT QoS 1 並延後 ack、由 Broker 保留未確認訊息」——技術上可行（consumer 關閉自動 ack、落庫後才回 PUBACK、Broker 開 persistence 與 persistent session），但只補上資料遺失，完全不解回程通道問題；且引入 inflight 窗口與批次門檻互鎖的陷阱（`max_inflight_messages` 若小於批次門檻，批次永遠湊不滿、永遠不 ack，直接卡死）。(c)「接受風險、將措辭降級為盡力而為」——碳排數據雖可容忍少量誤差，但本專題核心賣點即「填補員工行為數據採集的技術空白」，在送達保證上主動降級不利於論述。
+  - **連帶影響**：第 2、3 節協定表與分流敘述、4.4 路徑表協定欄與 payload 段（topic → REST 端點）、4.4.2 撤銷機制（原生成立）、5.1 寫入策略（分 MQTT／HTTPS 兩軌）與 P2／P3 工作項、5.2 數據面職責與配置參數表、技術堆疊 Desktop Agent 列（移除 MQTT client 依賴）皆已同步更新。
+- **[D14] `DIGITAL_USAGE` 冪等去重定案：補 `collected_at` 勝出規則、`device_id` 納入唯一鍵（雲端路徑除外）**（v0.20）：[D12] 定的唯一鍵（`employee_id`, `usage_date`, `path_type`）有兩個缺口，v0.20 一併補齊。
+  - **缺口一：無法判定同日先後（對應原 (3)）**。路徑 A／C 送的是**當日累計值**、後到覆蓋先到；重送的舊封包若晚於新封包抵達，會把較新的累計值蓋回舊值。原 payload 僅有 `usage_date`（日期粒度），同日兩筆無從比較。**解法**：payload 與 `DIGITAL_USAGE` 皆補 `collected_at`（Agent 採集時間戳，UTC），upsert 加條件 `WHERE EXCLUDED.collected_at > digital_usage.collected_at`。用 Agent 端時間戳而非後端接收時間，因為要比較的是「哪一次採集較新」而非「哪一個封包先到」——後者正是亂序問題本身。
+  - **缺口二：鍵粒度與事件 ID 粒度錯位（對應原 (5)）**。4.4.3 事件 ID 的第一段 `id_token` 依 4.4.2 屬**每台裝置一枚**（裝置粒度），而落庫唯一鍵第一段 `employee_id` 屬**人**的粒度。一員工綁兩台電腦（辦公室桌機＋BYOD 筆電，於本專案 BYOD 定位下屬正常情境）同日各送 `path_type=pc`：Agent 端為兩個相異事件 ID（不重複），落庫卻撞同一鍵，後到者覆蓋先到者，等同吃掉一台電腦的使用量。**解法**：`DIGITAL_USAGE` 補 `device_id` FK 並納入唯一鍵，讓 DB 鍵粒度追上事件 ID 本就有的粒度。
+  - **但 `device_id` 不可一律納入——雲端路徑必須排除**：三條路徑的「資料本質粒度」不同。路徑 A（電腦）為 **per-device**（兩台電腦各自耗電，分列加總正確）；路徑 B（印表機）為 **per-printer**，兩台電腦各接不同印表機則加總正確；路徑 C（雲端）為 **per-account**——同一員工的兩台裝置查的是**同一個 Google 帳號**的 `usageInDrive`，會回傳同一個值，分列加總即憑空多算一倍。故雲端路徑的唯一鍵維持三段、不含 `device_id`。
+  - **實作以 partial unique index 表達，不用單一四段 constraint**：雲端列的 `device_id` 為 NULL，而 PostgreSQL 預設把 NULL 視為**互不相等**——單一四段 unique constraint 會讓雲端路徑的去重**靜默失效**（不報錯、只是同員工同日可插入無限多列雲端資料）。故改以兩個 partial unique index 分別表達兩種鍵粒度（SQL 見 5.1）。（PG 15+ 亦可改用 `UNIQUE NULLS NOT DISTINCT` 單一約束；仍採 partial index，因其把「鍵粒度依路徑而異」顯式寫進 schema，可自我文件化。）
+  - **`employee_id` 保留於列上、不改為靠 join 動態推導**：加入 `device_id` 後 `employee_id` 在功能上可經 `DEVICE_BINDING` 推導，看似冗餘。但裝置可重新綁定給不同員工（離職轉交、換人使用），若歸戶靠 join 推導，裝置一轉手**歷史資料的歸戶會被追溯改寫**。存為快照才能凍結「當時算在誰頭上」。（與 4.2 `WASTE_EVENT` 靠 `session_id` join 才知是誰的作法相反，因 session 為一次性、不會轉手，取捨基礎不同。）
+  - **對 Agent payload 零改動**：`device_id` 不需 Agent 上送——後端以 `id_token` 查 `DEVICE_BINDING` 本就同時取得 `employee_id` 與 `device_id`，現行只是丟棄未寫入。本項為純後端 ＋ ERD 改動。
+  - **否決「明訂一員工限綁一裝置」**：(a) 與 BYOD 定位直接衝突；(b) 後果更嚴重——多裝置撞鍵是「後到覆蓋先到」（少算一台、數字偏低但仍有資料），限綁一台則是「第二台完全無從採集」（直接沒有資料）；(c) 並不省事——現況 `EMPLOYEE ||--o{ DEVICE_BINDING` 為一對多、ERD 本就允許多綁定，真要強制須加 `UNIQUE (employee_id) WHERE status='active'`，**兩條路都要動 ERD**，只是動的表不同。
+  - **下游聚合的連帶約束（P2 實作須注意）**：員工層查詢須先依 `device_id` 加總。`co2e_kg`、時數、`print_pages` 可加總；`pc_avg_cpu_util`（平均值）與 `cpu_model`（字串）**不可直接加總或任取一筆**，須依 active 時數做加權平均，或規定此二欄僅在裝置層檢視。另多裝置下員工單日時數可能超過 24 小時（兩台機器各自耗電，物理上正確但介面上反直覺），建議 App／儀表板對員工層只顯示 `co2e_kg`，時數留待裝置分項展開。
+  - **附帶 ERD 改動**：`DEVICE` 補 `display_name`（綁定時由 Agent 送 hostname，或由員工自填如「辦公室桌機」）。裝置分項一旦對使用者可見，UUID 無法辨識是哪一台，此欄為必要而非選配。
+
 ---
 
 ### 4.5 QR Code 統一辨識模式（跨模組共用決策）
@@ -415,11 +442,11 @@ Eco-Agent 為無人值守背景程式，身份綁定採「**一次綁定、長�
 | 前端 App | Flutter（Android / iOS / Web 三平台），狀態管理 Provider / Riverpod |
 | Edge AI | YOLOv8n（Python，樹莓派本地推論）、OpenCV、Tesseract OCR |
 | 大語言模型 | OpenAI GPT-4o（OCR 後 NER、廢棄物 Fallback 判定） |
-| IoT 傳輸 | MQTT（Mosquitto Broker）、NFC（近場通訊）、SNMP |
+| IoT 傳輸 | MQTT（Mosquitto Broker，**僅廢棄物樹莓派**上行與配置下發）、NFC（近場通訊）、SNMP（Eco-Agent 讀印表機 page counter） |
 | 外部 API | TDX 運輸 API、Google Maps API、Google Drive API v3 |
-| 後端 | **FastAPI（Python，async）** ＋ **Supabase（代管 PostgreSQL）** ＋ 碳排運算引擎 ＋ 係數資料庫 ＋ MQTT consumer 批次寫入（詳見 5.1） |
+| 後端 | **FastAPI（Python，async）** ＋ **Supabase（代管 PostgreSQL）** ＋ 碳排運算引擎 ＋ 係數資料庫 ＋ MQTT consumer 批次寫入（廢棄物）＋ HTTPS 批次上傳端點與冪等 upsert（Eco-Agent）（詳見 5.1） |
 | 控制架構 | SD-IoT Controller（控制面／數據面分離；自建輕量版，實作為 FastAPI 內管理模組，詳見 5.2） |
-| Desktop Agent | **Go**（單一靜態執行檔，跨平台交叉編譯）；MQTT/SNMP/OAuth2 函式庫；DPAPI／Keychain 憑證保護 |
+| Desktop Agent | **Go**（單一靜態執行檔，跨平台交叉編譯）；HTTPS/SNMP/OAuth2 函式庫（v0.20 起不再需要 MQTT client，見 4.4 [D13]）；DPAPI／Keychain 憑證保護 |
 
 ### 5.1 後端框架與資料庫：FastAPI + Supabase
 
@@ -430,17 +457,39 @@ Eco-Agent 為無人值守背景程式，身份綁定採「**一次綁定、長�
 - 後端採 **FastAPI（Python，async）**；資料庫採 **Supabase（代管 PostgreSQL）**，ERD（`eco_sensing_erd.mmd`）直接對應建表。
 - Supabase 提供 connection pooler（Transaction mode，port 6543）；FastAPI **一律走 pooler 連線**，避免 async 高併發耗盡資料庫連線數。
 - **架構分工原則**：Supabase 管「資料存哪裡」；FastAPI 管「資料進來後怎麼算」——請求驗證、排放係數查詢、CO₂e 計算、廢棄物 session 配對歸戶、獎勵（EXP／碳幣）發放。App、樹莓派、Eco-Agent 一律經 FastAPI 進資料庫，**不直接讀寫 Supabase**，維持商業邏輯集中與控制面／數據面分離。
-- **資料寫入策略**：MQTT Broker（Mosquitto）本身即為天然緩衝（訊息佇列）：後端 MQTT consumer 訂閱 topic → 記憶體佇列累積 → 定時／定量**批次寫入（batch insert）** Supabase。App 端 HTTPS 事件（差旅上傳、NFC 電梯、廢棄物 session 開啟／投入完畢）為低頻請求，即時直寫。**寫入端不設獨立 cache 層**（評估依據見決策記錄 [D3]）。
+- **資料寫入策略（v0.20 起依來源分兩軌）**：
+  - **MQTT 軌（廢棄物樹莓派）**：MQTT Broker（Mosquitto）本身即為天然緩衝（訊息佇列）：後端 MQTT consumer 訂閱 topic → 記憶體佇列累積 → 定時／定量**批次寫入（batch insert）** Supabase。
+  - **HTTPS 軌（Eco-Agent，4.4 [D13] 起三路徑全走此軌）**：批次緩衝改由 **Agent 本地持久化佇列**承擔（4.4.3），後端**不再為此路徑設記憶體佇列**——收到一批（`uploadBatchMax` 上限 720 筆）即於**單一交易內**完成去重與 upsert，**commit 之後才回 `200`**。後端不緩衝反而是此軌的正確設計：唯有如此「`200` = 已落地」才成立，4.4.3 的端到端至少一次送達才無破口。**嚴禁先回 `200` 再非同步落地。**
+  - App 端 HTTPS 事件（差旅上傳、NFC 電梯、廢棄物 session 開啟／投入完畢）為低頻請求，即時直寫。**寫入端不設獨立 cache 層**（評估依據見決策記錄 [D3]）。
+- **`DIGITAL_USAGE` 冪等去重（兩層並用，v0.20 定案；設計依據見 4.4 [D14]）**：
+  - **應用層——收批後先依鍵摺疊**：同一唯一鍵只留 `collected_at` 最新的一筆，再組 upsert 語句。此為**必要步驟而非最佳化**：PostgreSQL 不允許同一 `ON CONFLICT DO UPDATE` 語句內有兩列衝突到同一鍵（報 `command cannot affect row a second time`），而本模型「每次輪詢以當日累計覆蓋同一筆」使重送的舊封包與新封包極易落在同一批次視窗內、構成同鍵。
+  - **DB 層——unique index 作最後防線**：`INSERT ... ON CONFLICT (...) DO UPDATE SET ... WHERE EXCLUDED.collected_at > digital_usage.collected_at`。應用層摺疊解決單批次內衝突、DB constraint 擋跨批次與（P3 多實例後）跨行程重複，兩層職責不同、不可互相取代。
+  - **鍵依路徑分兩組，以 partial unique index 表達**：
+
+    ```sql
+    -- 電腦／印表機：per-device，一裝置一列，員工層碳排以加總取得
+    CREATE UNIQUE INDEX uq_digital_usage_device ON digital_usage
+      (employee_id, usage_date, path_type, device_id)
+      WHERE path_type IN ('pc', 'printer');
+
+    -- 雲端：per-account，同員工多裝置查得同值，納入 device_id 會重複計算
+    CREATE UNIQUE INDEX uq_digital_usage_account ON digital_usage
+      (employee_id, usage_date, path_type)
+      WHERE path_type = 'cloud';
+    ```
+
+    **不可改用單一四段 unique constraint**：雲端列的 `device_id` 為 NULL，PostgreSQL 預設視 NULL 互不相等，四段鍵會使雲端路徑去重**靜默失效**（不報錯、只重複計算）。PG 15+ 可改用 `UNIQUE NULLS NOT DISTINCT` 達同等效果，仍採 partial index，因其把鍵粒度差異顯式寫入 schema。
+  - **員工層聚合須先依 `device_id` 加總**；`pc_avg_cpu_util` 與 `cpu_model` 為不可加總欄位，處理原則見 4.4 [D14]。
 - **讀取端快取**：排行榜與企業端儀表板的聚合查詢採**讀取端快取**（TTL 約 5 分鐘），初期以 FastAPI 行程內記憶體快取實作，規模擴大後升級 Redis（sorted set 天生適合排行榜）。
-- 容錯備註：批次佇列在後端崩潰時可能遺失數秒內未落地資料（碳排數據可容忍）；如需強化，將 MQTT QoS 設為 1 並延後 ack，由 Broker 保留未確認訊息。
+- 容錯備註：**MQTT 軌（廢棄物）**之記憶體佇列於後端崩潰時可能遺失數秒內未落地資料（碳排數據可容忍）；如需強化，將 MQTT QoS 設為 1 並延後 ack（consumer 關閉自動 ack、落庫後才回 PUBACK），由 Broker 保留未確認訊息——惟須注意 `max_inflight_messages` 必須大於批次門檻，否則批次永遠湊不滿、永遠不 ack 而互鎖，且須開 Broker persistence 與 persistent session。**HTTPS 軌（Eco-Agent）不受此限**：其緩衝在 Agent 本地磁碟，後端崩潰時 Agent 收不到 `200`、資料仍在本機佇列，下次觸發自然重送（4.4.3）。
 
 **分階段開發步驟**
 
 | 階段 | 目標 | 主要工作項目 | 完成判準 | 狀態 |
 |------|------|--------------|----------|------|
 | P1 直通版 | API 跑通、資料落地 | Supabase 依 ERD 建表；FastAPI 實作四大模組寫入／查詢 API（逐筆直寫，不加緩衝）；以 Swagger 測通全部端點；App 假資料改串真 API | 四大模組資料皆可經 API 寫入並查回 | ⬜ 未開始 |
-| P2 批次與快取版 | 效能與穩定 | MQTT consumer ＋ 記憶體佇列批次寫入（廢棄物、Desktop Agent）；排行榜／儀表板讀取端快取（TTL 5 分）；廢棄物 session 逾時結算與互斥鎖落地 | 批次寫入上線；儀表板重複查詢不重算 | ⬜ 未開始 |
-| P3 擴充版（視規模啟用） | 大規模部署韌性 | 導入 Redis（排行榜 sorted set、跨實例共享快取）；MQTT QoS／重送策略；基本監控與告警 | 多後端實例部署下快取結果一致 | ⬜ 未開始 |
+| P2 批次與快取版 | 效能與穩定 | MQTT consumer ＋ 記憶體佇列批次寫入（**廢棄物**）；**Eco-Agent HTTPS 批次上傳端點與冪等 upsert**（應用層摺疊、partial unique index、`collected_at` 勝出規則、commit 後才回 `200`）；排行榜／儀表板讀取端快取（TTL 5 分）；廢棄物 session 逾時結算與互斥鎖落地 | 批次寫入上線；重送同一批不產生重複列、亦不覆蓋較新值；儀表板重複查詢不重算 | ⬜ 未開始 |
+| P3 擴充版（視規模啟用） | 大規模部署韌性 | 導入 Redis（排行榜 sorted set、跨實例共享快取）；MQTT QoS／重送策略（廢棄物軌）；基本監控與告警 | 多後端實例部署下快取結果一致；多實例並行寫入時 DB unique index 仍擋住重複 | ⬜ 未開始 |
 
 #### 決策記錄（脈絡與依據）
 
@@ -456,7 +505,7 @@ Eco-Agent 為無人值守背景程式，身份綁定採「**一次綁定、長�
 
 **定位總結（一句話）**
 
-> SD-IoT Controller ＝ FastAPI 內的管理模組（裝置註冊／綁定撤銷 ＋ 配置與策略下發 ＋ 係數庫 ＋ 健康監控），透過 MQTT retained topic 與 HTTPS 回應夾帶兩條通道對數據面施加控制；數據面 ＝ 四顆 SVS 的資料上行、MQTT consumer 批次寫入與碳排運算引擎。
+> SD-IoT Controller ＝ FastAPI 內的管理模組（裝置註冊／綁定撤銷 ＋ 配置與策略下發 ＋ 係數庫 ＋ 健康監控），透過 MQTT retained topic（樹莓派）與 HTTPS 回應夾帶（Eco-Agent／App）兩條通道對數據面施加控制；數據面 ＝ 四顆 SVS 的資料上行、批次寫入與碳排運算引擎。
 
 - Controller 實作為 FastAPI 後端內的一個邏輯模組（例如 `controller/` package），**不另建獨立服務**：控制面與數據面的「分離」是**邏輯分離**（模組邊界、職責劃分），而非部署分離（獨立行程／主機）。
 
@@ -464,7 +513,7 @@ Eco-Agent 為無人值守背景程式，身份綁定採「**一次綁定、長�
 
 | 層面 | 職責 | 在 Eco-Sensing 中的對應 |
 |------|------|------------------------|
-| 數據面（Data Plane） | 實際資料流與運算 | 四顆 SVS 的資料上行（MQTT topics、HTTPS 資料端點）、MQTT consumer 批次寫入、碳排運算引擎、廢棄物 session 配對歸戶 |
+| 數據面（Data Plane） | 實際資料流與運算 | 四顆 SVS 的資料上行（廢棄物走 MQTT topic，其餘走 HTTPS 資料端點，見 4.4 [D13]）、MQTT consumer 批次寫入（廢棄物）與 HTTPS 批次冪等 upsert（Eco-Agent）、碳排運算引擎、廢棄物 session 配對歸戶 |
 | 控制面（Controller） | 感知器的註冊、配置、策略、監控、生命週期 | 裝置註冊與綁定／解綁／遠端撤銷、排放係數庫維護與下發、參數配置（session 逾時、信心度閾值、批次參數）、裝置健康監控（`last_seen`／心跳） |
 
 **既有設計已覆蓋的控制面功能（無需重工）**
@@ -482,12 +531,12 @@ Eco-Agent 為無人值守背景程式，身份綁定採「**一次綁定、長�
 | 樹莓派（廢棄物） | YOLOv8n 信心度閾值（Fallback 觸發點）、秤重觸發靈敏度 |
 | 廢棄物 session | 逾時秒數、互斥鎖（方案 C）啟用開關——「視部署規模啟用」即典型控制面策略開關（policy toggle），由 Controller 決定而非改 code 重佈 |
 | Eco-Agent | `thresholdCount`、`idleThreshold`、`maxAge`、`checkInterval`、`computerUsageRecordInterval`、`driveQuotaInterval`、`uploadBatchMax`、`printerPollInterval`（已定案值見 4.4.4） |
-| MQTT consumer | batch flush 間隔、批量上限、QoS 等級 |
+| MQTT consumer（廢棄物軌） | batch flush 間隔、批量上限、QoS 等級 |
 
 **配置下發通道（依裝置性質分流，呼應混合協定架構）**
 
 - **樹莓派**：MQTT **retained message** 發佈至 `config/bin/{id}` 類 topic——裝置一連線即取得最新配置，Controller 改參數即時推送；Mosquitto 原生支援，實作成本極低，為最具 SDN 特徵的控制通道。
-- **Eco-Agent／App**：走 HTTPS——開機拉取一次，之後每次上傳時後端回應**夾帶配置版本號**，版本不符再拉取；複用 4.4.2 既有的「撤銷狀態夾帶於上傳回應」機制，一石二鳥。
+- **Eco-Agent／App**：走 HTTPS——開機拉取一次，之後每次上傳時後端回應**夾帶配置版本號**，版本不符再拉取；複用 4.4.2 既有的「撤銷狀態夾帶於上傳回應」機制，一石二鳥。**（v0.20 註）**：Eco-Agent 上傳全改 HTTPS 後（4.4 [D13]），此通道與資料上行合流為同一條連線，無須為配置另闢通道；同一條回應一次承載「已落地確認」「撤銷狀態」「配置版本號」三件事。
 
 **開發排程**
 
@@ -508,7 +557,7 @@ Eco-Agent 為無人值守背景程式，身份綁定採「**一次綁定、長�
 |------|------|----------|------|
 | 第一步 | Eco-Sensing App GUI | Flutter 三平台 App，先用假資料撐 UI（按鈕事件簡易回饋），Provider/Riverpod 狀態管理 | 🟡 進行中 |
 | 第二步 | 銜接硬體（IoT） | 智能垃圾桶 QR Code 模組、電梯 NFC；實作 SD-IoT 架構與 Controller | 🟡 進行中 |
-| 第三步 | 建立伺服器 | Supabase（PostgreSQL）建表、FastAPI 服務與碳排運算引擎、MQTT consumer 批次寫入（依 5.1 分階段 P1→P2 推進） | 🟡 進行中 |
+| 第三步 | 建立伺服器 | Supabase（PostgreSQL）依 ERD 建表、FastAPI 服務與碳排運算引擎、寫入雙軌（廢棄物 MQTT consumer 批次寫入／Eco-Agent HTTPS 批次冪等 upsert）（依 5.1 分階段 P1→P2 推進） | 🟡 進行中 |
 | 第四步 | 串接 API | 同步後端與前端數據；串接大語言模型 API | ⬜ 未開始 |
 | 第五步 | 測試與實驗 | 系統穩定性、防呆機制測試；導入學校/中小企業實驗環境並記錄成果 | ⬜ 未開始 |
 
@@ -536,8 +585,16 @@ Eco-Agent 為無人值守背景程式，身份綁定採「**一次綁定、長�
 - [4.2][待實測] 廢棄物模組 session 逾時秒數（孤兒事件自動結算門檻）與互斥鎖（方案 C）是否依部署規模啟用，待實測決定。
 - [4.4][已決議] ~~Eco-Agent 綁定碼短效時長、Access/Refresh Token 期限與輪換策略~~ → **`bindingCodeTTL` 5 分鐘、Access Token 1 小時、Refresh Token 90 天（到期重綁、不輪換），詳見 4.4.4**。綁定碼儲存於 `BINDING_CODE` 表（詳見 4.4.2、ERD）。
 - [4.4][已決議] ~~Eco-Agent 撤銷狀態的回傳時機與離線撤銷延遲容忍度~~ → **採每次上傳夾帶（不另做心跳）；離線撤銷延遲上界 ≈ `maxAge`（24h），延遲期間裝置本就送不出資料，可接受，詳見 4.4.2**。
-- [4.4][已決議] ~~Eco-Agent 上傳觸發參數（computerUsageRecordInterval、driveQuotaInterval、累積量門檻、最長滯留時數）~~ → **已定案值詳見 4.4.4**（本地佇列儲存選型 SQLite vs append-only 檔仍待實測；唯一事件 ID 組成鍵已隨 [D12] 定為（`employee_id`, `usage_date`, `path_type`），後端冪等去重策略待與 5.1 批次寫入對齊）。
-- [4.4][已決議] ~~`DIGITAL_USAGE` 如何區分三條感測路徑、`path_type` 由誰決定~~ → **採方案 A「一路徑一列」**：新增 `path_type`（`pc`／`printer`／`cloud`），唯一鍵 =（`employee_id`, `usage_date`, `path_type`）；`path_type` **由 Agent 明送、不由後端從欄位樣態推斷**（零值與 NULL 難分辨、推斷規則脆化、與冪等鍵不自洽、Agent 本就知道）。`factor_id`／`co2e_kg` 屬後端寫入、不在 Agent payload。詳見 4.4 決策記錄 [D12]；ERD 已同步補 `path_type`、`drive_trash_gb`。
+- [4.4][已決議] ~~Eco-Agent 上傳觸發參數（computerUsageRecordInterval、driveQuotaInterval、累積量門檻、最長滯留時數）~~ → **已定案值詳見 4.4.4**（本地佇列儲存選型 SQLite vs append-only 檔仍待實測；唯一事件 ID 組成鍵見 [D12]，後端冪等去重策略已於 v0.20 與 5.1 對齊完畢，見下方 [4.4/5.1][已決議] 項）。
+- [4.4][已決議] ~~`DIGITAL_USAGE` 如何區分三條感測路徑、`path_type` 由誰決定~~ → **採方案 A「一路徑一列」**：新增 `path_type`（`pc`／`printer`／`cloud`），唯一鍵 =（`employee_id`, `usage_date`, `path_type`）（**v0.20 [D14] 已將 `pc`／`printer` 兩路徑之鍵擴為四段、加入 `device_id`**）；`path_type` **由 Agent 明送、不由後端從欄位樣態推斷**（零值與 NULL 難分辨、推斷規則脆化、與冪等鍵不自洽、Agent 本就知道）。`factor_id`／`co2e_kg` 屬後端寫入、不在 Agent payload。詳見 4.4 決策記錄 [D12]；ERD 已同步補 `path_type`、`drive_trash_gb`。
+- [4.4/5.1][已決議] ~~後端冪等去重策略與 5.1 批次寫入對齊（原五項待釐清）~~ → **五項於 v0.20 全數定案**，4.4.3 與 5.1 的交接介面已明訂。逐項結果：
+  - **(1) 去重層級** → **兩層並用**：應用層收批後依鍵摺疊，DB 層以 unique index 作最後防線（P3 多實例後尤為必要）。規格見 5.1「`DIGITAL_USAGE` 冪等去重」。
+  - **(2) 單一批次內同鍵衝突** → **後端收批後先在記憶體依鍵摺疊（同鍵只留 `collected_at` 最新一筆）再組 upsert 語句**，避開 PostgreSQL `command cannot affect row a second time`。列為必要步驟而非最佳化。
+  - **(3) 同鍵衝突勝出規則** → **補 `collected_at`（Agent 採集時間戳，UTC）於 payload 與 `DIGITAL_USAGE`**，upsert 加條件 `WHERE EXCLUDED.collected_at > digital_usage.collected_at`，重送舊封包不覆蓋較新值。詳見 4.4 [D14]。
+  - **(4) 「200 才清佇列」在 MQTT 上不成立** → **採「上傳全改 HTTPS」**：Eco-Agent 三條路徑一律走 HTTPS，`200` 由後端於 commit 後發出，「收到 200」與「已落地」等價，破口消失；同時一併解決 4.4.2 撤銷與 5.2 配置版本號所需的回程通道（原需另闢）。否決 (a)「MQTT QoS 1 延後 ack」（只補資料遺失、不解回程通道，另引入 inflight 窗口與批次門檻互鎖陷阱）與 (c)「降級為盡力而為」。詳見 4.4 [D13]。
+  - **(5) 多裝置撞鍵** → **`DIGITAL_USAGE` 補 `device_id` FK 並納入唯一鍵，但雲端路徑除外**（雲端為帳號層級事實，多裝置查得同值，納入即重複計算）；以兩個 **partial unique index** 分別表達兩種鍵粒度，避開「四段鍵下 `device_id` 為 NULL 導致雲端去重靜默失效」的 PostgreSQL NULL 陷阱。`employee_id` 保留於列上作歸戶快照。否決「一員工限綁一裝置」（與 BYOD 衝突、後果更嚴重、且同樣須動 ERD）。詳見 4.4 [D14]。
+  - **連帶改動**：ERD `DIGITAL_USAGE` 新增 `device_id` FK 與 `collected_at`、新增關係 `DEVICE ||--o{ DIGITAL_USAGE : reports`、`DEVICE` 新增 `display_name`；第 2／3 節協定表與分流判準、4.4 路徑表與 payload 段、4.4.2、4.4.3、5.1、5.2、技術堆疊皆已同步。
+  - **留待 P2 實作時處理（非設計缺口）**：`uploadBatchMax`（720）與單一交易大小的實測調參；員工層聚合查詢中 `pc_avg_cpu_util`／`cpu_model` 之不可加總處理（加權平均 vs 僅裝置層檢視）；多裝置下員工單日時數可超過 24 小時的介面呈現方式（建議員工層只顯示 `co2e_kg`）。
 - [4.4][已決議] ~~雲端儲存（路徑 C）能耗模型的儲存量取值~~ → **取 `usageInDrive`**（否決 `limit`、`usage`），詳見 4.4 決策記錄 [D8]。
   - [4.4][已決議] ~~`usageInDriveTrash` 激勵任務是否落地~~ → **確定納入**：Agent 上傳 `usageInDriveTrash`、入庫 `DIGITAL_USAGE.drive_trash_gb`（ERD 已同步）、納入 i 減碳任務清單；獎勵額度依 1.7 遊戲化機制設計。詳見 4.4 [D8]。
   - [4.4][待確認] 實驗場域員工帳號 `usageInDrive` 量級是否合於一般日常帳號，異常高者疑為機構共享／服務帳號、取樣須排除或標註。
@@ -574,3 +631,4 @@ Eco-Agent 為無人值守背景程式，身份綁定採「**一次綁定、長�
 | 2026-07-21 | v0.17 | **雲端路徑（路徑 C）應用場景盤點與隱私分界**：先界定天花板——雲端碳排量級偏小（[D9] 係數粗估單人 `usageInDrive` 6.593 GB ≈ ~0.058 kWh/年），故本路徑價值在「行為可見、可執行、可教育」而非減碳數字大。盤點四類應用：(一)行為誘因（數位斷捨離：大型/冷/重複檔清理，`usageInDriveTrash` 為其一)、(二)趨勢與異常（`usageInDrive` 時間序列做成長趨勢與暴增偵測，並接回 [D8] 異常帳號判斷)、(三)機構層級洞察（總碳排/成長率、儲存效率 KPI、ESG 報告素材——對企業最實質價值)、(四)教育與意識（「雲端＝一直開著的硬碟」具象化、補齊完整數位碳足跡)。**隱私分界**：(二)(四) 零額外隱私成本可放心納入；(一)(三) 中涉「讀檔案清單/檔名/內容特徵」者需放大 OAuth scope，列為「可行但待隱私/scope 決策」、不默默實作（比照印表機 [D5]/[D6]）。新增決策記錄 [D10]；更新現況快照 Eco-Agent 列；第 7 節新增應用場景盤點項與隱私分界待決策子項。 |
 | 2026-07-22 | v0.18 | **印表機 SNMP 五參數納入綁定流程**：`ECO_AGENT_PRINTER_HOST`／`COMMUNITY`／`PORT`／`OID`（＋既有 `printerPollInterval`）中，前四者屬 per-device 環境事實，決議隨 4.4.2 綁定於本機 `.env` 設定（主要填 `HOST`，少數機種覆寫 `OID`），不走 5.2 全域下發；綁定時可上報非敏感的 `HOST`／`OID` 供後台監控、但不反向下發覆蓋本地。`printerPollInterval`（全域策略）續走 5.2。4.4.2 新增「個人專屬印表機 SNMP 參數」小節（含五參數表、HOST 只填 IP、page counter 前後相減與重置防呆）；新增決策記錄 [D11]（per-device 本地事實不進 `sensor_config`、全域策略才進，判準同 [D8]/[D3]）；現況快照 Eco-Agent 列補註 |
 | 2026-07-23 | v0.19 | **電梯（4.3）NFC 感測端形式定案：採被動 NFC tag，主動式 ESP32 降級**：關鍵差異不在成本而在「樓層資訊從哪裡來」——被動 tag 的樓層來自 tag 貼附樓層（寫死於 tag 內容），**完全不需知道轎廂即時位置、不需接觸電梯控制系統**；主動 ESP32 隨轎廂移動、自身不知樓層，須串接電梯控制系統（涉 CNS／EN 81 安規、原廠保固、轎廂取電施工，專題取得批准機率極低）或以氣壓／加速度推算（誤差累積過大、不足以支撐歸戶）。故定案被動 tag：零施工／零供電／零改裝／對電梯零風險／可完整移除，且將對電梯公司的請求由「串接控制系統」降為「電梯廳張貼標籤」，審批摩擦大幅降低。更新 4.3 規格段「識別」條目（改述被動 tag 與不接觸控制系統聲明）、新增「未掃出場的孤兒記錄處理」（逾時自動結算，同 4.2 session 思路）、依賴宣告（新增 4.5 URI 格式約定與場域張貼許可）；新增決策記錄 [D5]；現況快照電梯列更新；第 7 節新增 4.3 已決議（感測端形式）、待安排（張貼許可與窗口、tag 數量與位置）、待設計（孤兒記錄逾時門檻）三項，並自原待實測項移除 ESP32 選型。另產出附件《電梯公司詢問清單》供場域接洽使用 |
+| 2026-07-30 | v0.20 | **Eco-Agent 上傳協定統一為 HTTPS，冪等去重五項全數定案**。(一)**[D13] 路徑 A／B 由 MQTT 改走 HTTPS**：原「後端回 200 才清佇列」合約在 MQTT 上不成立（PUBACK 由 Broker 而非後端發出，Agent 清佇列時資料可能仍在後端記憶體未落地，崩潰即永久遺失且無副本可重送）；且 4.4.2 撤銷（`401/403`）與 5.2 配置版本號夾帶皆需 HTTP 回應語意，續走 MQTT 反須額外再開一條 HTTPS。又 Eco-Agent 依 4.4.3 為「單一路徑單日僅 1 筆」的極低頻上傳、執行於桌機而非受限硬體，MQTT 的輕量優勢用不上。故三路徑統一 HTTPS；廢棄物樹莓派續走 MQTT（匿名單向、不需回程），混合協定架構的分流判準由「是不是 IoT 裝置」修正為「需不需要後端的回應」。否決 (a) MQTT QoS 1 延後 ack、(c) 措辭降級為盡力而為。(二)**[D14] 冪等去重定案**：payload 與 `DIGITAL_USAGE` 補 `collected_at`（Agent 採集時間戳）作亂序抵達勝出規則；`DIGITAL_USAGE` 補 `device_id` FK 並納入唯一鍵以修正「事件 ID 為裝置粒度、落庫鍵為人粒度」的錯位（一員工綁桌機＋BYOD 筆電即撞鍵），**惟雲端路徑不納入**（帳號層級事實，多裝置查得同值，加總即重複計算），以兩個 partial unique index 分別表達，避開四段鍵下 NULL 互不相等導致雲端去重靜默失效的陷阱；`employee_id` 保留為歸戶快照（裝置轉手不追溯改寫歷史）；對 Agent payload 零改動（後端由 `id_token` 查 `DEVICE_BINDING` 即同時取得 `employee_id` 與 `device_id`）。否決「一員工限綁一裝置」。應用層摺疊＋DB constraint 兩層並用，upsert 加 `EXCLUDED.collected_at >` 條件。更新第 2 節協定表、第 3 節協定架構（新增分流判準說明）、4.4 標題／依賴／路徑表／payload／協定注意、4.4.2 撤銷註記、4.4.3 至少一次送達段（改寫為端到端成立）、5.1 寫入策略（分 MQTT／HTTPS 兩軌）與冪等去重規格（含 SQL）、容錯備註、P2／P3 工作項、5.2 定位總結／數據面／配置參數表／下發通道、技術堆疊三列、現況快照三列；新增決策記錄 [D13][D14]；第 7 節原 [4.4/5.1][待設計] 五項改列已決議。**ERD 同步**：`DIGITAL_USAGE` 新增 `device_id` FK 與 `collected_at`、新增關係 `DEVICE ||--o{ DIGITAL_USAGE : reports`（補上與 `WASTE_EVENT` 對稱的感測硬體關係）、`DEVICE` 新增 `display_name`（裝置分項對使用者可見後 UUID 無法辨識）。 |
