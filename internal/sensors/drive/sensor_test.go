@@ -197,10 +197,11 @@ func TestUsesUsageInDriveNotUsage(t *testing.T) {
 	assertQueuedUsage(t, ctx, q, 4.0) // 4 GB（usageInDrive），非 50 GB（usage）
 }
 
-// TestTrashFieldDisabled：drive_trash_gb 現階段不啟用，payload 不應含此欄（v15 [D8] 待確認）。
-func TestTrashFieldDisabled(t *testing.T) {
+// TestTrashFieldEnabled：drive_trash_gb 已啟用，payload 應含此欄且取自 usageInDriveTrash（v15 [D8]）。
+func TestTrashFieldEnabled(t *testing.T) {
 	ctx := context.Background()
 	q := newTestQueue(t)
+	// usageInDriveTrash = 0.5 GB → drive_trash_gb 應為 0.5。
 	sampler := &fakeSampler{quota: Quota{UsageInDrive: 4_000_000_000, UsageInDriveTrash: 500_000_000}}
 	clk := &clock{t: time.Date(2026, 7, 21, 10, 0, 0, 0, time.UTC)}
 	s := newSensor(t, q, sampler, clk)
@@ -214,8 +215,12 @@ func TestTrashFieldDisabled(t *testing.T) {
 	if len(batch) == 0 {
 		t.Fatal("佇列為空")
 	}
-	if _, ok := batch[0].Payload["drive_trash_gb"]; ok {
-		t.Error("drive_trash_gb 不應出現在 payload（現階段不啟用）")
+	got, ok := batch[0].Payload["drive_trash_gb"].(float64)
+	if !ok {
+		t.Fatal("drive_trash_gb 應出現在 payload（已啟用）")
+	}
+	if got < 0.499 || got > 0.501 {
+		t.Errorf("drive_trash_gb = %v, want ~0.5", got)
 	}
 }
 

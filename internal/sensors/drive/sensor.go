@@ -166,10 +166,14 @@ func (s *Sensor) enqueue(ctx context.Context, quota Quota) error {
 	// （含 Gmail/Photos，超出路徑 C 的 Drive SVS 範圍）與 limit（配額額度非實際佔用；
 	// Workspace pooled 模式下為機構共享總池、全員雷同無區辨力）。
 	driveUsageGB := round6(quota.UsageInDriveGB())
+	// drive_trash_gb 取 usageInDriveTrash，作「可立即釋放的儲存能耗」減碳激勵任務（v15 [D8]）。
+	// 已內含於 usageInDrive，此欄為「其中可釋放部分」的拆分、非額外能耗；後端於 App/儀表板
+	// 標為可執行減碳任務（清空垃圾桶即減碳）。
+	driveTrashGB := round6(quota.UsageInDriveTrashGB())
 	payload := map[string]any{
 		"date":           date,
 		"drive_usage_gb": driveUsageGB,
-		"drive_trash_gb": round6(quota.UsageInDriveTrashGB()),	// 啟用 usageInDriveTrash 以支援「可立即釋放的儲存能耗」減碳激勵任務（v15 [D8]）。
+		"drive_trash_gb": driveTrashGB,
 	}
 
 	e := queue.Event{
@@ -181,7 +185,7 @@ func (s *Sensor) enqueue(ctx context.Context, quota Quota) error {
 		return err
 	}
 	s.log.Info("path C enqueued drive usage",
-		"date", date, "drive_usage_gb", driveUsageGB)
+		"date", date, "drive_usage_gb", driveUsageGB, "drive_trash_gb", driveTrashGB)
 	return nil
 }
 
