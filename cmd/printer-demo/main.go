@@ -1,6 +1,7 @@
 // Command printer-demo 是路徑 B（印表機）Step 3.1 的獨立驗證：以 SNMP v2c 查
-// prtMarkerLifeCount（OID 1.3.6.1.2.1.43.10.2.1.4）取累計頁數，前後相減得增量頁數，
-// 並歸戶到 mock ID Token。
+// prtMarkerLifeCount（OID 1.3.6.1.2.1.43.10.2.1.4）取累計頁數、查序號 OID 取
+// printer_serial，兩者原樣印出（v0.23 [D15]：差分與歸鍵防呆皆移至後端，Agent 不在本機
+// 相減，也不判斷 counter 是否重置）。
 //
 // 用法：
 //
@@ -13,12 +14,13 @@
 //	export ECO_AGENT_PRINTER_COMMUNITY=public    # 可選，預設 public
 //	export ECO_AGENT_PRINTER_PORT=161            # 可選，預設 161
 //	export ECO_AGENT_PRINTER_OID=...             # 可選，index 非 1.1 的機種可覆寫
+//	export ECO_AGENT_PRINTER_SERIAL_OID=...      # 可選，指定單一序號 OID，略過三候選 fallback 鏈
 //
 // 未設 ECO_AGENT_PRINTER_HOST 時優雅降級：印出指引、結束，不崩潰（§2 Step 3.4）。
 //
-// 注意：本 demo 僅驗證 3.1「SNMP 取值與增量換算」，以固定間隔連續輪詢數次觀察。
-// 正式的輪詢觸發（3.2）將沿用 Step 2 的持久化時間戳到期判斷（lastPrinterPollAt，
-// 同掛 checkInterval），不是這裡的固定迴圈；入列與送出屬 3.3，尚未實作。
+// 注意：本 demo 僅驗證 3.1「SNMP 取值」，以固定間隔連續輪詢數次觀察。正式的輪詢觸發
+// （3.2）將沿用 Step 2 的持久化時間戳到期判斷（lastPrinterPollAt，同掛 checkInterval），
+// 不是這裡的固定迴圈；入列與送出屬 3.3，尚未實作（見 cmd/printer-sensor-demo）。
 package main
 
 import (
@@ -28,11 +30,13 @@ import (
 	"fmt"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"time"
 
 	"eco-agent/internal/config"
 	"eco-agent/internal/enroll"
 	"eco-agent/internal/platform"
+	"eco-agent/internal/queue"
 	"eco-agent/internal/sensors/printer"
 )
 
@@ -50,7 +54,7 @@ func main() {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt)
 	defer stop()
 
-	fmt.Println("=== 路徑 B Step 3.1：SNMP 取 page counter 與增量頁數 ===")
+	fmt.Println("=== 路徑 B Step 3.1：SNMP 取 page counter 與序號 ===")
 
 	client, agent, err := buildClient(*mock)
 	if err != nil {
@@ -65,9 +69,24 @@ func main() {
 		defer agent.Close()
 	}
 
-	// 歸戶對象：個人專屬印表機與員工一對一，增量直接歸給本機綁定的 ID Token。
+	// device_uuid（§4.4.2）與憑證同存一份本機佇列；本 demo 只驗證 SNMP 讀值，隨手開一個
+	// 臨時佇列即可，不涉及真實的上傳/觸發（見 cmd/printer-sensor-demo）。
+	dir, err := os.MkdirTemp("", "printer-demo-")
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "mkdir temp 失敗：%v\n", err)
+		os.Exit(1)
+	}
+	defer os.RemoveAll(dir)
+	q, err := queue.Open(ctx, filepath.Join(dir, "queue.db"))
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "queue.Open 失敗：%v\n", err)
+		os.Exit(1)
+	}
+	defer q.Close()
+
+	// 歸戶對象：個人專屬印表機與員工一對一，讀數直接歸給本機綁定的 ID Token。
 	// MOCK: enroll 現階段回傳固定假 token（§5），去識別化語意不變——只帶 token，不帶姓名/Email。
-	enr := enroll.New(platform.NewMemoryKeychain())
+	enr := enroll.New(platform.NewMemoryKeychain(), q)
 	if err := enr.EnsureBound(ctx); err != nil {
 		fmt.Fprintf(os.Stderr, "EnsureBound 失敗：%v\n", err)
 		os.Exit(1)
@@ -79,7 +98,7 @@ func main() {
 	}
 
 	addr, oid := client.Target()
-	fmt.Printf("目標：%s　OID：%s\n", addr, oid)
+	fmt.Printf("目標：%s　page counter OID：%s\n", addr, oid)
 	fmt.Printf("歸戶 ID Token：%s\n\n", idToken)
 
 	run(ctx, client, agent, *polls, *interval)
@@ -97,6 +116,7 @@ func buildClient(mock bool) (*printer.SNMPClient, *printer.MockAgent, error) {
 	if err != nil {
 		return nil, nil, err
 	}
+	agent.SetString(printer.DefaultSerialPrtGeneralOID, "DEMO-MOCK-PRINTER-SN")
 	host, port := agent.Addr()
 	c, err := printer.NewSNMPClient(host, printer.WithPort(port))
 	if err != nil {
@@ -107,11 +127,9 @@ func buildClient(mock bool) (*printer.SNMPClient, *printer.MockAgent, error) {
 	return c, agent, nil
 }
 
-// run 連續輪詢並印出每次的累計值與增量。
+// run 連續輪詢並印出每次的累計值與序號（皆原樣讀出，不在本機做任何換算，[D15]）。
 func run(ctx context.Context, c *printer.SNMPClient, agent *printer.MockAgent, polls int, interval time.Duration) {
-	prev := int64(-1) // -1 表示尚無基準：首次輪詢只建立基準、不計增量
 	counter := uint64(1000)
-	total := int64(0)
 
 	for i := 1; i <= polls; i++ {
 		cur, err := c.PageCounter(ctx)
@@ -123,14 +141,12 @@ func run(ctx context.Context, c *printer.SNMPClient, agent *printer.MockAgent, p
 				fmt.Printf("#%d 查詢失敗（跳過，下次輪詢重試）：%v\n", i, err)
 			}
 		} else {
-			delta := printer.PageDelta(prev, cur)
-			if prev < 0 {
-				fmt.Printf("#%d 累計頁數 = %d（首次輪詢：僅建立基準，不計增量）\n", i, cur)
+			serial, serr := c.SerialNumber(ctx)
+			if serr != nil {
+				fmt.Printf("#%d 累計頁數 = %d，序號查無（%v；[D14] 將回退以 device_id 歸鍵並標記）\n", i, cur, serr)
 			} else {
-				total += delta
-				fmt.Printf("#%d 累計頁數 = %d，增量 = %d 頁（本次執行累計 %d 頁）\n", i, cur, delta, total)
+				fmt.Printf("#%d 累計頁數 = %d，序號 = %s\n", i, cur, serial)
 			}
-			prev = cur
 		}
 
 		if i == polls {
@@ -148,9 +164,8 @@ func run(ctx context.Context, c *printer.SNMPClient, agent *printer.MockAgent, p
 		}
 	}
 
-	fmt.Printf("\n本次執行共採得增量 %d 頁。\n", total)
-	fmt.Println("（增量頁數將於 3.3 以 payload {usage_date, print_pages} 入列、走 HTTPS 送出；")
-	fmt.Println("  能耗 = 增量頁數 × 紙張生命週期係數，由後端計算。）")
+	fmt.Println("\n（正式流程以 payload {usage_date, printer_page_counter, printer_serial} 原樣入列、走 HTTPS 送出；")
+	fmt.Println("  頁數差分與 counter 重置防呆、能耗換算（頁數 × 紙張生命週期係數）皆由後端計算，[D15]。）")
 }
 
 // degradeHint 印出未設定目標印表機時的優雅降級指引（§2 Step 3.4）。
@@ -158,7 +173,7 @@ func degradeHint(err error) {
 	fmt.Printf("\n路徑 B 已跳過（優雅降級）：%v\n", err)
 	fmt.Println("請設定下列環境變數後再試（見 .env.example / README）：")
 	fmt.Printf("  %s（必填，印表機 IP 或主機名）\n", printer.EnvHost)
-	fmt.Printf("  %s、%s、%s（可選）\n", printer.EnvCommunity, printer.EnvPort, printer.EnvOID)
+	fmt.Printf("  %s、%s、%s、%s（可選）\n", printer.EnvCommunity, printer.EnvPort, printer.EnvOID, printer.EnvSerialOID)
 	fmt.Println("\n或免真實印表機，改跑本機 mock SNMP responder：")
 	fmt.Println("  go run ./cmd/printer-demo -mock")
 }

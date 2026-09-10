@@ -108,7 +108,7 @@ func main() {
 	}
 	defer q.Close()
 
-	enr := enroll.New(platform.NewMemoryKeychain())
+	enr := enroll.New(platform.NewMemoryKeychain(), q)
 	if err := enr.EnsureBound(ctx); err != nil {
 		fatal("EnsureBound", err)
 	}
@@ -251,6 +251,7 @@ func startPathB(ctx context.Context, q *queue.Queue, enr *enroll.Enroller, cfg c
 		if aerr != nil {
 			return fmt.Sprintf("跳過（mock responder 啟動失敗：%v）", aerr), stop
 		}
+		agent.SetString(printer.DefaultSerialPrtGeneralOID, "DEMO-MOCK-PRINTER-SN")
 		host, port := agent.Addr()
 		c, cerr := printer.NewSNMPClient(host, printer.WithPort(port))
 		if cerr != nil {
@@ -316,7 +317,11 @@ func summarize(ctx context.Context, q *queue.Queue, idToken, date string, p queu
 	case queue.PathDrive:
 		return fmt.Sprintf("%.2fGB", toF(e.Payload["drive_usage_gb"]))
 	case queue.PathPrinter:
-		return fmt.Sprintf("%.0f頁", toF(e.Payload["print_pages"]))
+		serial := toS(e.Payload["printer_serial"])
+		if serial == "" {
+			serial = "身份不明"
+		}
+		return fmt.Sprintf("counter=%.0f serial=%s", toF(e.Payload["printer_page_counter"]), serial)
 	default:
 		return "-"
 	}
@@ -351,6 +356,13 @@ func toF(v any) float64 {
 		return f
 	}
 	return 0
+}
+
+func toS(v any) string {
+	if s, ok := v.(string); ok {
+		return s
+	}
+	return ""
 }
 
 func fatal(msg string, err error) {

@@ -49,7 +49,7 @@ func main() {
 	}
 	defer q.Close()
 
-	enr := enroll.New(platform.NewMemoryKeychain())
+	enr := enroll.New(platform.NewMemoryKeychain(), q)
 	if err := enr.EnsureBound(ctx); err != nil {
 		fatal("EnsureBound", err)
 	}
@@ -188,7 +188,7 @@ func demoPayload(p queue.PathType) map[string]any {
 	case queue.PathDrive:
 		return map[string]any{"drive_usage_gb": 12.3, "drive_trash_gb": 1.2}
 	case queue.PathPrinter:
-		return map[string]any{"print_pages": 7}
+		return map[string]any{"printer_page_counter": 1007, "printer_serial": "DEMO-SN-0001"}
 	default:
 		return map[string]any{}
 	}

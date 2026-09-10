@@ -15,7 +15,7 @@ Eco-Sensing 專案的桌面能耗監測 Agent（Desktop Agent）。以 **Go** �
 
 > 三路徑一律走 HTTPS（v20 §4.4 **[D13]**，v0.20 起）：原「A／B 走 MQTT」之設計已廢止，Eco-Agent 不再連線 MQTT Broker、不需 MQTT client 依賴。理由為「後端回 200 才清佇列」在 MQTT 上不成立（PUBACK 由 Broker 而非後端發出），且撤銷（401/403）與配置版本號夾帶皆需 HTTP 回應語意。
 
-後端尚未完成：綁定、集中配置、上傳端點/token 以常數／mock 替代；佇列、觸發、冪等、去識別化為真做。所有「等後端」處以標記標出（見下方清單）。
+後端尚未完成：綁定、集中配置、上傳端點/token 以常數／mock 替代；佇列、觸發、冪等、去識別化為真做。所有「等後端」處以標記標出（見下方清單）。`device_uuid`（§4.4.2，供日後索取 binding_code 時帶上、供後端 upsert `DEVICE` 列而非盲插）已真實落地，與佇列同一份 SQLite 持久化（非 mock）。
 
 ## 建置與執行
 
@@ -73,9 +73,11 @@ go run ./cmd/drive-demo             # 之後即可取用量
 
 路徑 B 本階段只做「個人專屬印表機 SNMP 輪詢歸戶」一軌（印表機與員工一對一，故 page counter 增量可直接歸給本機 ID Token）。共用機的 Print Server Log / Pull Printing API 為未來實作，不在範圍。
 
-查 SNMP v2c（UDP 161）OID `1.3.6.1.2.1.43.10.2.1.4`（`prtMarkerLifeCount`，出廠以來累計輸出頁數），前後兩次相減得增量頁數。
+查 SNMP v2c（UDP 161）OID `1.3.6.1.2.1.43.10.2.1.4`（`prtMarkerLifeCount`，出廠以來累計輸出頁數），**原樣上送、不在本機相減**——區間差分與 counter 重置防呆全部移至後端計算（v0.23 `[D15]`；baseline 若只活在 Agent 本機，重裝／換機／佇列毀損即遺失）。另查序號 OID 取 `printer_serial`，供以「印表機」而非「裝置」歸鍵（`[D14]` 缺口二：桌機＋筆電同指一台專屬印表機時，若以 `device_id` 歸鍵會重複計算頁數）。
 
-輪詢節奏沿用路徑 C 的觸發模型：持久化時間戳 `lastPrinterPollAt` + `checkInterval` 巡檢到期判斷（**非絕對計時器**）。首次輪詢只建立基準不入列（沒有前值可減）；counter 重置（換機／韌體重置）不回補、改以新值為基準。payload 為 `{date, print_pages}`（當日累計增量頁數），**只送感測值** — 能耗（頁數 × 紙張生命週期係數）一律由後端換算，Agent 不算也不送係數。
+輪詢節奏沿用路徑 C 的觸發模型：持久化時間戳 `lastPrinterPollAt` + `checkInterval` 巡檢到期判斷（**非絕對計時器**）。每次到期輪詢讀到什麼就送什麼、upsert 覆蓋同一筆事件，不需要任何跨重啟的本機基準狀態。payload 為 `{usage_date, printer_page_counter, printer_serial}`，**只送感測值** — 能耗（頁數 × 紙張生命週期係數）與頁數差分一律由後端換算，Agent 不算也不送係數。
+
+序號依序試三個候選 OID：`prtGeneralSerialNumber`（Printer-MIB，首選）→ `entPhysicalSerialNum`（ENTITY-MIB，次選）→ `sysName`（末選，管理員可改、不保證唯一）；三者皆查無值時 payload 省略 `printer_serial`，由後端以 `device_id` 回退歸鍵並標記「印表機身份不明」。
 
 | 環境變數 | 用途 |
 |----------|------|
@@ -83,6 +85,7 @@ go run ./cmd/drive-demo             # 之後即可取用量
 | `ECO_AGENT_PRINTER_COMMUNITY` | SNMP v2c 唯讀 community（可選，預設 `public`） |
 | `ECO_AGENT_PRINTER_PORT` | SNMP 埠（可選，預設 `161`） |
 | `ECO_AGENT_PRINTER_OID` | page counter instance OID（可選，預設 `…43.10.2.1.4.1.1`；index 非 1.1 的機種可覆寫，未覆寫時程式會自動巡走該欄取第一筆） |
+| `ECO_AGENT_PRINTER_SERIAL_OID` | 印表機序號 OID（可選）。設定時只查此單一 OID，略過三候選 fallback 鏈 |
 
 前提：Agent 所在機器須與印表機**同網段**且對方開啟 SNMP。BYOD 情境下常不成立——查不通時記 log、跳過，不使 Agent 卡住；也**不因此永久停用路徑 B**（筆電可能稍後才接回辦公室網段），每次巡檢自然重試，連續失敗只記一次 Warn 後降為 Debug。
 
@@ -127,7 +130,7 @@ A（電腦，真實取樣）、C（雲端，有憑證就真串 Drive API）、B�
 - **`usage_date` vs `collected_at`** — 前者是「哪一天的用量」（日期粒度、唯一鍵組成），後者是「何時採集到」（時刻粒度、亂序勝出判定），兩者不可混用。
 - **`collected_at`（[D14]）** — 路徑 A／C 送的是「當日累計值」、後到覆蓋先到；重送的舊封包若晚於新封包抵達，會把較新的累計值蓋回舊值。後端以 `EXCLUDED.collected_at > digital_usage.collected_at` 判定勝出。取 **Agent 端**時間戳而非後端接收時間，因為要比較的是「哪一次採集較新」而非「哪一個封包先到」。同一事件 ID 每次 upsert 都會更新此戳（與佇列 `created_at` 相反 — 後者固定於首次入列，供 `maxAge` 正確計算滯留時間）。
 - **`employee_id`／`device_id` 不上送** — Agent 只持有 `id_token`，後端以其查 `DEVICE_BINDING` 即同時解出兩者。故 [D14] 將 `device_id` 納入 `DIGITAL_USAGE` 唯一鍵一事，對 Agent payload 零改動。
-- 各路徑量值：A `pc_active_hours`／`pc_idle_hours`／`pc_avg_cpu_util`／`cpu_model`；B `print_pages`；C `drive_usage_gb`／`drive_trash_gb`。一律只送原始量，能耗換算全在後端（[D7]）。
+- 各路徑量值：A `pc_active_hours`／`pc_idle_hours`／`pc_avg_cpu_util`／`cpu_model`；B `printer_page_counter`（SNMP 壽命累計讀數，非區間差值）／`printer_serial`（查無序號時省略，見「路徑 B」一節）；C `drive_usage_gb`／`drive_trash_gb`。一律只送原始量，能耗換算（含 B 的頁數差分）全在後端（[D7]／[D15]）。
 
 ## 「等後端」標記清單（§7 / §8.6）
 

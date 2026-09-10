@@ -1,11 +1,12 @@
-// MOCK: 本檔提供一個極簡的本機 SNMP v2c responder，模擬印表機回應 page counter，
-// 供 Step 3.V「對本機 mock SNMP responder 輪詢，確認增量頁數正確」與單元測試使用。
+// MOCK: 本檔提供一個極簡的本機 SNMP v2c responder，模擬印表機回應 page counter 與序號，
+// 供 Step 3.V「對本機 mock SNMP responder 輪詢，確認讀數與序號正確」與單元測試使用。
 //
 // 定位同 internal/uploader/mockserver.go：屬開發/驗證工具，不參與正式採集路徑；
 // 正式路徑一律以 gosnmp 對真實印表機查詢（見 client.go）。
 //
-// 支援子集：SNMP v2c 的 GetRequest / GetNextRequest / GetBulkRequest，回應 Counter32；
-// 查無此 instance 回 noSuchInstance、走到表尾回 endOfMibView。不支援 v1/v3、Set、Trap。
+// 支援子集：SNMP v2c 的 GetRequest / GetNextRequest / GetBulkRequest，數值型 OID 回
+// Counter32、字串型 OID（如序號）回 OCTET STRING；查無此 instance 回 noSuchInstance、
+// 走到表尾回 endOfMibView。不支援 v1/v3、Set、Trap。
 package printer
 
 import (
@@ -15,13 +16,15 @@ import (
 	"sync"
 )
 
-// MockAgent 是監聽 UDP 的假 SNMP 代理，持有一組 OID → 累計值。
+// MockAgent 是監聽 UDP 的假 SNMP 代理，持有一組 OID → 累計值（Counter32）與
+// 一組 OID → 字串值（OCTET STRING，如序號）。
 type MockAgent struct {
 	conn      *net.UDPConn
 	community string
 
-	mu     sync.Mutex
-	values map[string]uint64
+	mu        sync.Mutex
+	values    map[string]uint64
+	strValues map[string]string
 
 	closeOnce sync.Once
 	closed    chan struct{}
@@ -31,6 +34,7 @@ type MockAgent struct {
 //
 // community 為預期的 v2c community（空字串時預設 DefaultCommunity）；不符的請求直接丟棄，
 // 模擬真實代理的行為（請求端會逾時）。values 為初始 OID → 累計值，會被複製一份。
+// 字串值（序號等）於啟動後另以 SetString 設定。
 func StartMockAgent(addr, community string, values map[string]uint64) (*MockAgent, error) {
 	if community == "" {
 		community = DefaultCommunity
@@ -47,6 +51,7 @@ func StartMockAgent(addr, community string, values map[string]uint64) (*MockAgen
 		conn:      conn,
 		community: community,
 		values:    make(map[string]uint64, len(values)),
+		strValues: make(map[string]string),
 		closed:    make(chan struct{}),
 	}
 	for k, v := range values {
@@ -67,6 +72,21 @@ func (a *MockAgent) SetValue(oid string, v uint64) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	a.values[oid] = v
+}
+
+// SetString 設定（或新增）某 OID 的字串值（OCTET STRING），供測試模擬序號等欄位。
+func (a *MockAgent) SetString(oid, v string) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	a.strValues[oid] = v
+}
+
+// DeleteString 移除某 OID 的字串值，供 demo／測試模擬「裝置不支援此 OID」
+// （與空字串不同：查詢會得到 noSuchInstance，而非「存在但為空」）。
+func (a *MockAgent) DeleteString(oid string) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	delete(a.strValues, oid)
 }
 
 // Close 停止代理並釋放 socket。
@@ -183,25 +203,31 @@ func (a *MockAgent) handle(req []byte) ([]byte, error) {
 	)), nil
 }
 
-// getVarbind 組出 GetRequest 的單筆回應 varbind：有值回 Counter32，無值回 noSuchInstance。
+// getVarbind 組出 GetRequest 的單筆回應 varbind：數值型 OID 有值回 Counter32、字串型
+// OID 有值回 OCTET STRING，皆無值回 noSuchInstance。
 func (a *MockAgent) getVarbind(oid string) []byte {
 	a.mu.Lock()
 	v, ok := a.values[oid]
+	sv, sok := a.strValues[oid]
 	a.mu.Unlock()
-	if !ok {
+	switch {
+	case ok:
+		return varbind(oid, tlv(tagCounter32, encodeUint(v)))
+	case sok:
+		return varbind(oid, tlv(tagOctetString, []byte(sv)))
+	default:
 		return varbind(oid, tlv(tagNoSuchInst, nil))
 	}
-	return varbind(oid, tlv(tagCounter32, encodeUint(v)))
 }
 
-// nextVarbind 組出 GetNextRequest 的單筆回應 varbind：取字典序（逐節數值）之後的第一筆；
-// 已無下一筆則回 endOfMibView。
+// nextVarbind 組出 GetNextRequest 的單筆回應 varbind：取字典序（逐節數值）之後的第一筆
+// （合併數值與字串兩組 OID 一起排序）；已無下一筆則回 endOfMibView。
 func (a *MockAgent) nextVarbind(oid string) []byte {
-	next, v, ok := a.next(oid)
+	next, val, ok := a.next(oid)
 	if !ok {
 		return varbind(oid, tlv(tagEndOfMibView, nil))
 	}
-	return varbind(next, tlv(tagCounter32, encodeUint(v)))
+	return varbind(next, val)
 }
 
 // bulkVarbinds 以「非重複項各取一次 next、其餘項連續取 maxRepetitions 次」組出 GetBulk 回應。
@@ -220,33 +246,40 @@ func (a *MockAgent) bulkVarbinds(oids []string, nonRepeaters, maxRepetitions int
 		}
 		cur := oid
 		for r := 0; r < maxRepetitions; r++ {
-			next, v, ok := a.next(cur)
+			next, val, ok := a.next(cur)
 			if !ok {
 				body = append(body, varbind(cur, tlv(tagEndOfMibView, nil))...)
 				break
 			}
-			body = append(body, varbind(next, tlv(tagCounter32, encodeUint(v)))...)
+			body = append(body, varbind(next, val)...)
 			cur = next
 		}
 	}
 	return body
 }
 
-// next 回傳排序後嚴格大於 oid 的第一筆。
-func (a *MockAgent) next(oid string) (string, uint64, bool) {
+// next 回傳排序後嚴格大於 oid 的第一筆（合併數值與字串兩組 OID 一起排序），連同其已編碼
+// 的值 TLV（Counter32 或 OCTET STRING，依所屬的哪一組值而定）。
+func (a *MockAgent) next(oid string) (string, []byte, bool) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
-	keys := make([]string, 0, len(a.values))
+	keys := make([]string, 0, len(a.values)+len(a.strValues))
 	for k := range a.values {
+		keys = append(keys, k)
+	}
+	for k := range a.strValues {
 		keys = append(keys, k)
 	}
 	sort.Slice(keys, func(i, j int) bool { return compareOID(keys[i], keys[j]) < 0 })
 	for _, k := range keys {
 		if compareOID(k, oid) > 0 {
-			return k, a.values[k], true
+			if v, ok := a.values[k]; ok {
+				return k, tlv(tagCounter32, encodeUint(v)), true
+			}
+			return k, tlv(tagOctetString, []byte(a.strValues[k])), true
 		}
 	}
-	return "", 0, false
+	return "", nil, false
 }
 
 // varbind 組出 VarBind ::= SEQUENCE { name OID, value }。OID 無法編碼時回空（該筆略過）。

@@ -6,14 +6,17 @@
 // 現階段後端不存在，故本套件以 mock 實作（§7）：
 //   - IDToken()／AccessToken()／RefreshToken() 回傳 mock 常數；
 //   - 但憑證一律經 platform.Keychain 金鑰庫抽象存取（Refresh Token 不寫純文字檔，§1），
-//     日後換真值只改 keychain 實作與 Bind() 內容，不動本套件對外結構。
+//     日後換真值只改 keychain 實作與 Bind() 內容，不動本套件對外結構；
+//   - device_uuid（DeviceUUID）已真實落地（非 mock）：與後端無關、純本機識別碼產生與
+//     持久化，日後接後端只需在索取 binding_code 時把它塞進 request body。
 //
 // ── 完整綁定規格（供日後實作對照，現不落地後端側）──────────────────────────────
 //
 // 綁定階段流程（§4.4.2）：
-//  1. Agent 向後端索取一次性 binding_code（短效）；後端於 BINDING_CODE 表建立記錄
-//     （status=pending、created_at、expires_at = created_at + bindingCodeTTL(5 分)、
-//     device_id 指向本裝置）。
+//  1. Agent 向後端索取一次性 binding_code（短效），**帶上本機持久化的 device_uuid**
+//     （見 DeviceUUID；供後端 upsert DEVICE 列而非盲插，避免綁定失敗殘留列累積）；
+//     後端於 BINDING_CODE 表建立記錄（status=pending、created_at、
+//     expires_at = created_at + bindingCodeTTL(5 分)、device_id 指向本裝置）。
 //  2. Agent 將 binding_code 編入 QR Code 顯示（內容為全系統統一 custom scheme URI，
 //     見 v12 §4.5，例：ecosensing://bind?code=<binding_code>）。
 //  3. 員工以已登入的 Eco-Sensing App 掃碼；App 依 URI host/path 判定為綁定動作。
@@ -39,7 +42,10 @@ import (
 	"sync"
 	"time"
 
+	"github.com/google/uuid"
+
 	"eco-agent/internal/platform"
+	"eco-agent/internal/queue"
 )
 
 // 金鑰庫鍵名（綁定產物持久化於金鑰庫）。
@@ -47,6 +53,12 @@ const (
 	keyIDToken      = "eco-agent.id_token"
 	keyRefreshToken = "eco-agent.refresh_token"
 )
+
+// stateKeyDeviceUUID 為 device_uuid 於佇列 state 表的持久化鍵（§4.4.2）。
+//
+// 存於佇列（與 4.4.3 的 SQLite 同檔）而非金鑰庫：device_uuid 不是機密——它只是供後端
+// upsert DEVICE 列用的本機識別碼，外洩無安全影響，不需金鑰庫等級的保護。
+const stateKeyDeviceUUID = "deviceUUID"
 
 // mock 憑證常數（§7）。日後由真實綁定流程自後端取得。
 const (
@@ -72,6 +84,7 @@ var (
 type Enroller struct {
 	mu sync.Mutex
 	kc platform.Keychain
+	q  *queue.Queue
 
 	// Access Token 於記憶體快取（不落金鑰庫；短期、可隨時由 Refresh Token 換發）。
 	accessToken       string
@@ -83,9 +96,36 @@ type Enroller struct {
 	now func() time.Time
 }
 
-// New 建立 Enroller，憑證經指定金鑰庫存取。
-func New(kc platform.Keychain) *Enroller {
-	return &Enroller{kc: kc, now: time.Now}
+// New 建立 Enroller，憑證經指定金鑰庫存取；device_uuid（§4.4.2）與持久化佇列同檔存放，
+// 故需傳入該佇列（呼叫端應先 queue.Open 再建立 Enroller）。
+func New(kc platform.Keychain, q *queue.Queue) *Enroller {
+	return &Enroller{kc: kc, q: q, now: time.Now}
+}
+
+// DeviceUUID 回傳本機持久化的裝置識別碼；不存在則產生一枚（UUID v4）並寫入佇列 state 表。
+//
+// §4.4.2：索取 binding_code 的端點①（POST /api/agent/binding-code）應帶上此值，供後端
+// 據以 upsert DEVICE 列而非盲插——否則每次啟動都盲插一筆，綁定失敗（員工未掃碼／逾時）
+// 殘留的 DEVICE 列會持續累積。同一裝置重複呼叫恆得同一值（先讀後端未有才寫入，非每次重產）。
+func (e *Enroller) DeviceUUID(ctx context.Context) (string, error) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	return e.deviceUUIDLocked(ctx)
+}
+
+func (e *Enroller) deviceUUIDLocked(ctx context.Context) (string, error) {
+	v, ok, err := e.q.GetState(ctx, stateKeyDeviceUUID)
+	if err != nil {
+		return "", fmt.Errorf("enroll: read device uuid: %w", err)
+	}
+	if ok && v != "" {
+		return v, nil
+	}
+	id := uuid.NewString()
+	if err := e.q.SetState(ctx, stateKeyDeviceUUID, id); err != nil {
+		return "", fmt.Errorf("enroll: persist device uuid: %w", err)
+	}
+	return id, nil
 }
 
 // IsBound 回報裝置是否已綁定（金鑰庫是否存在 Refresh Token）。
@@ -137,7 +177,12 @@ func (e *Enroller) Bind(ctx context.Context) error {
 	return e.bindLocked(ctx)
 }
 
-func (e *Enroller) bindLocked(_ context.Context) error {
+func (e *Enroller) bindLocked(ctx context.Context) error {
+	// 真實流程於索取 binding_code（端點①）時應帶上 device_uuid（§4.4.2）；先在此確保
+	// 已產生並落地，即使目前的 mock 綁定尚未真的送出任何請求。
+	if _, err := e.deviceUUIDLocked(ctx); err != nil {
+		return err
+	}
 	// MOCK: 略過 binding_code 索取／QR／App 掃碼／後端換 token，直接落地 mock 憑證。
 	if err := e.kc.Set(keyIDToken, mockIDToken); err != nil {
 		return fmt.Errorf("enroll: store id token: %w", err)

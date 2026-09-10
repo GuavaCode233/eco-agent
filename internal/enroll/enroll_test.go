@@ -3,19 +3,27 @@ package enroll
 import (
 	"context"
 	"errors"
+	"path/filepath"
 	"testing"
 	"time"
 
 	"eco-agent/internal/platform"
+	"eco-agent/internal/queue"
 )
 
-func newTestEnroller() (*Enroller, *platform.MemoryKeychain) {
+func newTestEnroller(t *testing.T) (*Enroller, *platform.MemoryKeychain) {
+	t.Helper()
 	kc := platform.NewMemoryKeychain()
-	return New(kc), kc
+	q, err := queue.Open(context.Background(), filepath.Join(t.TempDir(), "q.db"))
+	if err != nil {
+		t.Fatalf("queue.Open: %v", err)
+	}
+	t.Cleanup(func() { q.Close() })
+	return New(kc, q), kc
 }
 
 func TestNotBoundBeforeEnroll(t *testing.T) {
-	e, _ := newTestEnroller()
+	e, _ := newTestEnroller(t)
 	if bound, err := e.IsBound(); err != nil || bound {
 		t.Fatalf("IsBound = %v, %v; want false", bound, err)
 	}
@@ -29,7 +37,7 @@ func TestNotBoundBeforeEnroll(t *testing.T) {
 
 func TestEnsureBoundThenTokens(t *testing.T) {
 	ctx := context.Background()
-	e, kc := newTestEnroller()
+	e, kc := newTestEnroller(t)
 
 	if err := e.EnsureBound(ctx); err != nil {
 		t.Fatalf("EnsureBound: %v", err)
@@ -63,7 +71,7 @@ func TestEnsureBoundThenTokens(t *testing.T) {
 
 func TestAccessTokenRefreshOnExpiry(t *testing.T) {
 	ctx := context.Background()
-	e, _ := newTestEnroller()
+	e, _ := newTestEnroller(t)
 
 	// 注入可控時鐘。
 	base := time.Date(2026, 7, 16, 12, 0, 0, 0, time.UTC)
@@ -102,7 +110,7 @@ func TestAccessTokenRefreshOnExpiry(t *testing.T) {
 
 func TestRevocationSelfClear(t *testing.T) {
 	ctx := context.Background()
-	e, kc := newTestEnroller()
+	e, kc := newTestEnroller(t)
 	if err := e.EnsureBound(ctx); err != nil {
 		t.Fatal(err)
 	}
@@ -131,7 +139,7 @@ func TestRevocationSelfClear(t *testing.T) {
 
 func TestUnbindAllowsRebind(t *testing.T) {
 	ctx := context.Background()
-	e, _ := newTestEnroller()
+	e, _ := newTestEnroller(t)
 	if err := e.EnsureBound(ctx); err != nil {
 		t.Fatal(err)
 	}
@@ -147,5 +155,48 @@ func TestUnbindAllowsRebind(t *testing.T) {
 	}
 	if bound, _ := e.IsBound(); !bound {
 		t.Fatal("not bound after re-EnsureBound")
+	}
+}
+
+// device_uuid（§4.4.2）：首次呼叫產生並持久化，之後恆回同一值——供索取 binding_code
+// 時帶上，讓後端 upsert DEVICE 列而非每次啟動都盲插新列。
+func TestDeviceUUIDStableAcrossCalls(t *testing.T) {
+	ctx := context.Background()
+	e, _ := newTestEnroller(t)
+
+	id1, err := e.DeviceUUID(ctx)
+	if err != nil {
+		t.Fatalf("DeviceUUID: %v", err)
+	}
+	if id1 == "" {
+		t.Fatal("DeviceUUID 回傳空字串")
+	}
+	id2, err := e.DeviceUUID(ctx)
+	if err != nil {
+		t.Fatalf("DeviceUUID (2nd): %v", err)
+	}
+	if id2 != id1 {
+		t.Fatalf("DeviceUUID 不穩定：第一次 %q，第二次 %q", id1, id2)
+	}
+}
+
+// device_uuid 為本機持久化狀態（與佇列同檔），不落金鑰庫——非機密，換一個新的 Enroller
+// 實例（模擬重啟）指到同一份佇列仍應讀回同一值；指到不同佇列則各自獨立產生。
+func TestDeviceUUIDPersistsAcrossRestartSameQueue(t *testing.T) {
+	ctx := context.Background()
+	e1, kc := newTestEnroller(t)
+	id1, err := e1.DeviceUUID(ctx)
+	if err != nil {
+		t.Fatalf("DeviceUUID: %v", err)
+	}
+
+	// 模擬重啟：同一份佇列（e1.q）、全新 Enroller 實例。
+	e2 := New(kc, e1.q)
+	id2, err := e2.DeviceUUID(ctx)
+	if err != nil {
+		t.Fatalf("DeviceUUID (restart): %v", err)
+	}
+	if id2 != id1 {
+		t.Fatalf("重啟後 device_uuid 改變：%q → %q", id1, id2)
 	}
 }

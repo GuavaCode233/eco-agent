@@ -73,7 +73,7 @@ func main() {
 	if err != nil {
 		fatal("queue.Open", err)
 	}
-	enr := enroll.New(platform.NewMemoryKeychain())
+	enr := enroll.New(platform.NewMemoryKeychain(), q)
 	if err := enr.EnsureBound(ctx); err != nil {
 		fatal("EnsureBound", err)
 	}

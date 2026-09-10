@@ -13,11 +13,15 @@ import (
 // ── 測試替身 ──
 
 // fakeSampler 依序回傳預設的 page counter 值（用盡後停在最後一個），並計數呼叫次數。
-// err 非 nil 時一律回錯誤，用於模擬印表機不可達。
+// err 非 nil 時一律回錯誤，用於模擬印表機不可達。序號另由 serial／serialErr 控制，
+// 與 page counter 的成功/失敗互不影響（真實裝置也可能讀得到其一、讀不到另一）。
 type fakeSampler struct {
 	values []int64
 	err    error
 	calls  int
+
+	serial    string
+	serialErr error
 }
 
 func (f *fakeSampler) PageCounter(_ context.Context) (int64, error) {
@@ -33,6 +37,16 @@ func (f *fakeSampler) PageCounter(_ context.Context) (int64, error) {
 		i = len(f.values) - 1
 	}
 	return f.values[i], nil
+}
+
+func (f *fakeSampler) SerialNumber(_ context.Context) (string, error) {
+	if f.serialErr != nil {
+		return "", f.serialErr
+	}
+	if f.serial == "" {
+		return "", ErrNoSerialNumber
+	}
+	return f.serial, nil
 }
 
 type fakeEnroll struct {
@@ -83,23 +97,24 @@ func todayEvent(t *testing.T, q *queue.Queue, clk *clock) (queue.Event, bool) {
 	return e, ok
 }
 
-func printPages(t *testing.T, e queue.Event) int64 {
+// pageCounterOf 讀回事件 payload 的 printer_page_counter。
+func pageCounterOf(t *testing.T, e queue.Event) int64 {
 	t.Helper()
-	v, ok := e.Payload["print_pages"]
+	v, ok := e.Payload["printer_page_counter"]
 	if !ok {
-		t.Fatalf("payload 缺 print_pages：%v", e.Payload)
+		t.Fatalf("payload 缺 printer_page_counter：%v", e.Payload)
 	}
 	f, ok := v.(float64) // payload 經 JSON 往返，數值型別為 float64
 	if !ok {
-		t.Fatalf("print_pages 型別非數值：%T", v)
+		t.Fatalf("printer_page_counter 型別非數值：%T", v)
 	}
 	return int64(f)
 }
 
 // ── 3.2 觸發模型 ──
 
-// 冷啟動：無時間戳 → 首次巡檢即查；首次只建立基準、不入列（不可把 life count 當增量）。
-func TestColdStartEstablishesBaselineOnly(t *testing.T) {
+// 冷啟動：無時間戳 → 首次巡檢即查；讀到即原樣入列（[D15] 起無需先建立基準）。
+func TestColdStartEnqueuesImmediately(t *testing.T) {
 	ctx := context.Background()
 	q := newTestQueue(t)
 	clk := &clock{t: time.Date(2026, 7, 22, 9, 0, 0, 0, time.UTC)}
@@ -107,12 +122,12 @@ func TestColdStartEstablishesBaselineOnly(t *testing.T) {
 
 	s.checkAndPoll(ctx)
 
-	if _, ok := todayEvent(t, q, clk); ok {
-		t.Error("首次輪詢不應入列（無前值可減）")
+	e, ok := todayEvent(t, q, clk)
+	if !ok {
+		t.Fatal("首次輪詢應直接入列（[D15]：原樣送出絕對讀數，不需先建立基準）")
 	}
-	st := s.loadState(ctx)
-	if st.LastPageCount != 1000 {
-		t.Errorf("基準 = %d, want 1000", st.LastPageCount)
+	if got := pageCounterOf(t, e); got != 1000 {
+		t.Errorf("printer_page_counter = %d, want 1000", got)
 	}
 	if _, ok, _ := q.GetState(ctx, StateKeyLastPoll); !ok {
 		t.Error("應寫入 lastPrinterPollAt 時間戳")
@@ -127,9 +142,9 @@ func TestPollsOnlyWhenDue(t *testing.T) {
 	sampler := &fakeSampler{values: []int64{1000, 1005}}
 	s := newSensor(q, sampler, clk, nil)
 
-	s.checkAndPoll(ctx) // 冷啟動：查一次建立基準
+	s.checkAndPoll(ctx) // 到期即查並入列
 	if sampler.calls != 1 {
-		t.Fatalf("冷啟動應查 1 次，實際 %d", sampler.calls)
+		t.Fatalf("首次應查 1 次，實際 %d", sampler.calls)
 	}
 
 	clk.add(testPollInterval - time.Second) // 差一秒到期
@@ -145,10 +160,10 @@ func TestPollsOnlyWhenDue(t *testing.T) {
 	}
 	e, ok := todayEvent(t, q, clk)
 	if !ok {
-		t.Fatal("到期輪詢有增量時應入列")
+		t.Fatal("到期輪詢應 upsert 同一筆事件")
 	}
-	if got := printPages(t, e); got != 5 {
-		t.Errorf("print_pages = %d, want 5", got)
+	if got := pageCounterOf(t, e); got != 1005 {
+		t.Errorf("printer_page_counter = %d, want 1005（最新讀數，非累加）", got)
 	}
 }
 
@@ -188,27 +203,28 @@ func TestUnparsableTimestampTreatedAsDue(t *testing.T) {
 	}
 }
 
-// ── 3.3 增量累計與 payload ──
+// ── 3.3 送出（[D15]：原樣送出絕對讀數）──
 
-// 同一天多次輪詢：payload 為「當日累計」增量頁數，事件 ID 固定故 upsert 同一筆。
-func TestAccumulatesDailyPages(t *testing.T) {
+// 同一天多次輪詢：payload 恆為「本次讀到的最新絕對值」，事件 ID 固定故 upsert 同一筆
+// ——不再本機累加，差分留給後端以「當日最新讀數－前一日最新讀數」計算。
+func TestEachPollUpsertsLatestAbsoluteReading(t *testing.T) {
 	ctx := context.Background()
 	q := newTestQueue(t)
 	clk := &clock{t: time.Date(2026, 7, 22, 9, 0, 0, 0, time.UTC)}
 	s := newSensor(q, &fakeSampler{values: []int64{1000, 1003, 1010}}, clk, nil)
 
-	s.checkAndPoll(ctx) // 基準 1000
+	s.checkAndPoll(ctx) // 讀到 1000，入列
 	clk.add(testPollInterval)
-	s.checkAndPoll(ctx) // +3
+	s.checkAndPoll(ctx) // 讀到 1003，upsert 覆蓋
 	clk.add(testPollInterval)
-	s.checkAndPoll(ctx) // +7 → 累計 10
+	s.checkAndPoll(ctx) // 讀到 1010，upsert 覆蓋
 
 	e, ok := todayEvent(t, q, clk)
 	if !ok {
 		t.Fatal("應有當日事件")
 	}
-	if got := printPages(t, e); got != 10 {
-		t.Errorf("print_pages = %d, want 10（3+7 當日累計）", got)
+	if got := pageCounterOf(t, e); got != 1010 {
+		t.Errorf("printer_page_counter = %d, want 1010（最新讀數，非累加）", got)
 	}
 	if n, _ := q.Count(ctx); n != 1 {
 		t.Errorf("當日應僅一筆事件（upsert），實際 %d 筆", n)
@@ -217,125 +233,162 @@ func TestAccumulatesDailyPages(t *testing.T) {
 	if got := e.UsageDate; got != "2026-07-22" {
 		t.Errorf("UsageDate = %v, want 2026-07-22", got)
 	}
-	// 純感測：payload 只有感測值，不得夾帶共同欄位、能耗換算結果或係數。
-	if len(e.Payload) != 1 {
-		t.Errorf("payload 應只有 print_pages，實際：%v", e.Payload)
-	}
 	// [D14]：採集時間戳取自感測器時鐘，且隨每次 upsert 前進到最後一次輪詢的時刻。
 	if want := clk.now(); !e.CollectedAt.Equal(want) {
 		t.Errorf("CollectedAt = %v, want %v（最後一次採集的時刻）", e.CollectedAt, want)
 	}
 }
 
-// 期間沒列印（增量 0）不入列空事件，但基準與時間戳照樣推進。
-func TestNoDeltaDoesNotEnqueue(t *testing.T) {
+// counter 不增（期間沒列印）或倒退（counter 重置）皆原樣送出——重置防呆已移至後端
+// （[D15]：多觀測者讀到的是同一個絕對值，不需要 Agent 端自行判斷是否為「重置」）。
+func TestFlatOrDecreasingReadingStillEnqueued(t *testing.T) {
 	ctx := context.Background()
 	q := newTestQueue(t)
 	clk := &clock{t: time.Date(2026, 7, 22, 9, 0, 0, 0, time.UTC)}
-	s := newSensor(q, &fakeSampler{values: []int64{500, 500}}, clk, nil)
+	s := newSensor(q, &fakeSampler{values: []int64{5000, 5000, 12}}, clk, nil)
 
-	s.checkAndPoll(ctx)
+	s.checkAndPoll(ctx) // 5000
 	clk.add(testPollInterval)
-	s.checkAndPoll(ctx)
-
-	if n, _ := q.Count(ctx); n != 0 {
-		t.Errorf("無增量不應入列，實際 %d 筆", n)
+	s.checkAndPoll(ctx) // 仍 5000（無列印）
+	e, ok := todayEvent(t, q, clk)
+	if !ok || pageCounterOf(t, e) != 5000 {
+		t.Fatalf("無列印仍應原樣入列 5000，實際 ok=%v e=%v", ok, e.Payload)
 	}
-	if st := s.loadState(ctx); st.LastPageCount != 500 {
-		t.Errorf("基準 = %d, want 500", st.LastPageCount)
+
+	clk.add(testPollInterval)
+	s.checkAndPoll(ctx) // 讀到 12（換機／韌體重置）→ 原樣送出，不在本機判斷或回補
+	e, ok = todayEvent(t, q, clk)
+	if !ok {
+		t.Fatal("counter 重置後仍應正常入列")
+	}
+	if got := pageCounterOf(t, e); got != 12 {
+		t.Errorf("printer_page_counter = %d, want 12（原樣送出，重置防呆在後端）", got)
 	}
 }
 
-// 跨日：新日期起算新的一筆事件，舊日事件保留原累計。
+// 跨日：新日期起算新的一筆事件，各自持有自己那次輪詢讀到的絕對值。
 func TestCrossDayStartsNewEvent(t *testing.T) {
 	ctx := context.Background()
 	q := newTestQueue(t)
 	clk := &clock{t: time.Date(2026, 7, 22, 23, 50, 0, 0, time.UTC)}
 	s := newSensor(q, &fakeSampler{values: []int64{100, 104, 109}}, clk, nil)
 
-	s.checkAndPoll(ctx) // 基準 100
+	s.checkAndPoll(ctx) // 22 日：100
 	clk.add(testPollInterval)
-	s.checkAndPoll(ctx) // 22 日 +4
+	s.checkAndPoll(ctx) // 仍 22 日（區間未跨午夜）：104
 	day1, ok := todayEvent(t, q, clk)
 	if !ok {
 		t.Fatal("應有 22 日事件")
 	}
-	if got := printPages(t, day1); got != 4 {
-		t.Fatalf("22 日 print_pages = %d, want 4", got)
+	if got := pageCounterOf(t, day1); got != 104 {
+		t.Fatalf("22 日 printer_page_counter = %d, want 104", got)
 	}
 
 	clk.add(24 * time.Hour) // 跨到 23 日
-	s.checkAndPoll(ctx)     // +5 應計入新的一天
+	s.checkAndPoll(ctx)     // 109 應計入新的一天
 
 	day2, ok := todayEvent(t, q, clk)
 	if !ok {
 		t.Fatal("應有 23 日事件")
 	}
-	if got := printPages(t, day2); got != 5 {
-		t.Errorf("23 日 print_pages = %d, want 5（不含前一日的 4）", got)
+	if got := pageCounterOf(t, day2); got != 109 {
+		t.Errorf("23 日 printer_page_counter = %d, want 109", got)
 	}
 	if n, _ := q.Count(ctx); n != 2 {
 		t.Errorf("應為兩日各一筆，實際 %d 筆", n)
 	}
 }
 
-// counter 重置（換機／韌體重置）：不回補、以新值為基準重新起算。
-func TestCounterResetRebasesWithoutBackfill(t *testing.T) {
-	ctx := context.Background()
-	q := newTestQueue(t)
-	clk := &clock{t: time.Date(2026, 7, 22, 9, 0, 0, 0, time.UTC)}
-	s := newSensor(q, &fakeSampler{values: []int64{5000, 12, 15}}, clk, nil)
-
-	s.checkAndPoll(ctx) // 基準 5000
-	clk.add(testPollInterval)
-	s.checkAndPoll(ctx) // 讀到 12（重置）→ 不入列、改以 12 為基準
-
-	if n, _ := q.Count(ctx); n != 0 {
-		t.Errorf("counter 重置不應入列任何頁數，實際 %d 筆", n)
-	}
-	if st := s.loadState(ctx); st.LastPageCount != 12 {
-		t.Errorf("重置後基準 = %d, want 12", st.LastPageCount)
-	}
-
-	clk.add(testPollInterval)
-	s.checkAndPoll(ctx) // 15 - 12 = 3
-	e, ok := todayEvent(t, q, clk)
-	if !ok {
-		t.Fatal("重置後的增量仍應正常入列")
-	}
-	if got := printPages(t, e); got != 3 {
-		t.Errorf("print_pages = %d, want 3", got)
-	}
-}
-
-// 重啟：基準與當日累計由持久化狀態讀回，續accumulate 而非從零覆蓋。
-func TestStateSurvivesRestart(t *testing.T) {
+// 重啟：全新 Sensor 實例（無任何本機基準狀態可言，[D15] 起已無跨重啟差分狀態）
+// 直接讀到什麼就送什麼，upsert 覆蓋同一筆事件。
+func TestRestartHasNoLocalBaselineToLose(t *testing.T) {
 	ctx := context.Background()
 	q := newTestQueue(t)
 	clk := &clock{t: time.Date(2026, 7, 22, 9, 0, 0, 0, time.UTC)}
 
-	s1 := newSensor(q, &fakeSampler{values: []int64{1000, 1006}}, clk, nil)
+	s1 := newSensor(q, &fakeSampler{values: []int64{1000}}, clk, nil)
 	s1.checkAndPoll(ctx)
-	clk.add(testPollInterval)
-	s1.checkAndPoll(ctx) // 當日累計 6
 
 	// 模擬重啟：全新 Sensor 實例，共用同一份佇列/狀態。
 	s2 := newSensor(q, &fakeSampler{values: []int64{1009}}, clk, nil)
 	clk.add(testPollInterval)
-	s2.checkAndPoll(ctx) // +3 → 應為 9 而非 3
+	s2.checkAndPoll(ctx)
 
 	e, ok := todayEvent(t, q, clk)
 	if !ok {
 		t.Fatal("應有當日事件")
 	}
-	if got := printPages(t, e); got != 9 {
-		t.Errorf("print_pages = %d, want 9（重啟後續累計）", got)
+	if got := pageCounterOf(t, e); got != 1009 {
+		t.Errorf("printer_page_counter = %d, want 1009（重啟不影響：原樣送出最新讀數）", got)
+	}
+}
+
+// ── 序號（[D14] 缺口二）──
+
+// 序號可得：payload 應帶 printer_serial。
+func TestSerialIncludedWhenAvailable(t *testing.T) {
+	ctx := context.Background()
+	q := newTestQueue(t)
+	clk := &clock{t: time.Date(2026, 7, 22, 9, 0, 0, 0, time.UTC)}
+	sampler := &fakeSampler{values: []int64{1000}, serial: "SN-001"}
+	s := newSensor(q, sampler, clk, nil)
+
+	s.checkAndPoll(ctx)
+
+	e, ok := todayEvent(t, q, clk)
+	if !ok {
+		t.Fatal("應有當日事件")
+	}
+	if got, _ := e.Payload["printer_serial"].(string); got != "SN-001" {
+		t.Errorf("printer_serial = %q, want SN-001", got)
+	}
+}
+
+// 序號查無（三候選皆空）：不影響 page counter 入列，只省略 printer_serial 欄位——
+// 由後端以 device_id 回退歸鍵並標記「印表機身份不明」（[D14]）。
+func TestSerialUnavailableOmitsFieldButStillEnqueues(t *testing.T) {
+	ctx := context.Background()
+	q := newTestQueue(t)
+	clk := &clock{t: time.Date(2026, 7, 22, 9, 0, 0, 0, time.UTC)}
+	sampler := &fakeSampler{values: []int64{1000}} // serial 留空 → SerialNumber 回 ErrNoSerialNumber
+	s := newSensor(q, sampler, clk, nil)
+
+	s.checkAndPoll(ctx)
+
+	e, ok := todayEvent(t, q, clk)
+	if !ok {
+		t.Fatal("序號查無不應阻擋 page counter 入列")
+	}
+	if got := pageCounterOf(t, e); got != 1000 {
+		t.Errorf("printer_page_counter = %d, want 1000", got)
+	}
+	if _, present := e.Payload["printer_serial"]; present {
+		t.Errorf("序號查無時 payload 不應帶 printer_serial，實際：%v", e.Payload)
+	}
+}
+
+// 序號查詢本身出錯（如逾時，而非「查無」）：同樣降級為省略欄位，不阻擋 page counter。
+func TestSerialQueryErrorOmitsFieldButStillEnqueues(t *testing.T) {
+	ctx := context.Background()
+	q := newTestQueue(t)
+	clk := &clock{t: time.Date(2026, 7, 22, 9, 0, 0, 0, time.UTC)}
+	sampler := &fakeSampler{values: []int64{1000}, serialErr: errors.New("i/o timeout")}
+	s := newSensor(q, sampler, clk, nil)
+
+	s.checkAndPoll(ctx)
+
+	e, ok := todayEvent(t, q, clk)
+	if !ok {
+		t.Fatal("序號查詢出錯不應阻擋 page counter 入列")
+	}
+	if _, present := e.Payload["printer_serial"]; present {
+		t.Errorf("序號查詢出錯時 payload 不應帶 printer_serial，實際：%v", e.Payload)
 	}
 }
 
 // ── 失敗處理（3.2 重試語意／3.4 BYOD）──
 
-// 印表機不可達：不更新時間戳，下次巡檢自然重試；不入列、不推進基準。
+// 印表機不可達：不更新時間戳，下次巡檢自然重試；不入列。
 func TestUnreachableDoesNotAdvanceTimestamp(t *testing.T) {
 	ctx := context.Background()
 	q := newTestQueue(t)
@@ -357,7 +410,7 @@ func TestUnreachableDoesNotAdvanceTimestamp(t *testing.T) {
 	}
 }
 
-// 無法取得 ID Token（未綁定／已撤銷）：不入列、不推進狀態與時間戳，取得後下次輪詢照常。
+// 無法取得 ID Token（未綁定／已撤銷）：不入列、不推進時間戳，取得後下次輪詢照常。
 func TestIDTokenUnavailableDefersEverything(t *testing.T) {
 	ctx := context.Background()
 	q := newTestQueue(t)
@@ -365,18 +418,16 @@ func TestIDTokenUnavailableDefersEverything(t *testing.T) {
 	sampler := &fakeSampler{values: []int64{1000, 1004}}
 
 	s := newSensor(q, sampler, clk, fakeEnroll{err: errors.New("not bound")})
-	s.checkAndPoll(ctx) // 建立基準（不需 token）
-	clk.add(testPollInterval)
-	s.checkAndPoll(ctx) // 有增量但無 token → 不入列
+	s.checkAndPoll(ctx) // 讀到 1000，但無 token → 不入列
 
 	if n, _ := q.Count(ctx); n != 0 {
 		t.Fatalf("無 ID Token 不應入列，實際 %d 筆", n)
 	}
-	if st := s.loadState(ctx); st.LastPageCount != 1000 {
-		t.Errorf("入列失敗不應推進基準（下次由同一基準重算），實際 %d", st.LastPageCount)
+	if _, ok, _ := q.GetState(ctx, StateKeyLastPoll); ok {
+		t.Error("入列失敗不應推進時間戳（下次巡檢重試）")
 	}
 
-	// 取得 token 後：由同一基準重算，增量不遺失也不重複。
+	// 取得 token 後：下次輪詢正常入列最新讀數。
 	s2 := newSensor(q, &fakeSampler{values: []int64{1004}}, clk, nil)
 	clk.add(testPollInterval)
 	s2.checkAndPoll(ctx)
@@ -385,8 +436,8 @@ func TestIDTokenUnavailableDefersEverything(t *testing.T) {
 	if !ok {
 		t.Fatal("取得 token 後應入列")
 	}
-	if got := printPages(t, e); got != 4 {
-		t.Errorf("print_pages = %d, want 4（不遺失也不重複）", got)
+	if got := pageCounterOf(t, e); got != 1004 {
+		t.Errorf("printer_page_counter = %d, want 1004", got)
 	}
 }
 
@@ -425,19 +476,20 @@ func TestRunWithoutSamplerDisablesPath(t *testing.T) {
 	}
 }
 
-// 端到端（本機 mock SNMP responder）：確認增量頁數正確且歸戶到 ID Token（3.V）。
+// 端到端（本機 mock SNMP responder）：確認絕對讀數與序號正確且歸戶到 ID Token（3.V）。
 func TestSensorWithMockSNMPAgent(t *testing.T) {
 	ctx := context.Background()
 	q := newTestQueue(t)
 	clk := &clock{t: time.Date(2026, 7, 22, 9, 0, 0, 0, time.UTC)}
 
 	client, agent := newTestClient(t, map[string]uint64{DefaultPageCounterOID: 800})
+	agent.SetString(DefaultSerialPrtGeneralOID, "SN-E2E-001")
 	s := newSensor(q, client, clk, nil)
 
-	s.checkAndPoll(ctx) // 基準 800
+	s.checkAndPoll(ctx) // 800
 	agent.SetValue(DefaultPageCounterOID, 812)
 	clk.add(testPollInterval)
-	s.checkAndPoll(ctx) // +12
+	s.checkAndPoll(ctx) // 812（原樣讀出，非增量）
 
 	date := clk.now().Format("2006-01-02")
 	e, ok, err := q.Get(ctx, queue.EventID(testToken, date, queue.PathPrinter))
@@ -447,8 +499,11 @@ func TestSensorWithMockSNMPAgent(t *testing.T) {
 	if !ok {
 		t.Fatal("應有當日事件")
 	}
-	if got := printPages(t, e); got != 12 {
-		t.Errorf("print_pages = %d, want 12", got)
+	if got := pageCounterOf(t, e); got != 812 {
+		t.Errorf("printer_page_counter = %d, want 812", got)
+	}
+	if got, _ := e.Payload["printer_serial"].(string); got != "SN-E2E-001" {
+		t.Errorf("printer_serial = %q, want SN-E2E-001", got)
 	}
 	if e.PathType != queue.PathPrinter {
 		t.Errorf("PathType = %s, want %s", e.PathType, queue.PathPrinter)

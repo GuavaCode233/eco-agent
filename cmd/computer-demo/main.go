@@ -67,7 +67,7 @@ func main() {
 	}
 	defer q.Close()
 
-	enr := enroll.New(platform.NewMemoryKeychain())
+	enr := enroll.New(platform.NewMemoryKeychain(), q)
 	if err := enr.EnsureBound(ctx); err != nil {
 		fatal("EnsureBound", err)
 	}

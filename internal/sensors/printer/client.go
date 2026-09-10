@@ -1,19 +1,20 @@
 // Package printer 實作路徑 B：印表機用紙量感測（CLAUDE.md Step 3）。
 //
 // 歸戶前提（v15）：本階段只做「個人專屬印表機 SNMP 輪詢歸戶」一軌——印表機與員工一對一，
-// 故 counter 增量可直接歸給本機綁定的 ID Token。共用機的 Print Server Log / Pull Printing API
-// 屬「未來實作」不在範圍；手動上傳用紙量屬 App 端、非 Agent 路徑。
+// 故 page counter 讀數可直接歸給本機綁定的 ID Token。共用機的 Print Server Log / Pull
+// Printing API 屬「未來實作」不在範圍；手動上傳用紙量屬 App 端、非 Agent 路徑。
 //
-// 本階段（Step 3.1）落地「SNMP 取 page counter 與增量換算」：
-//   - SNMP v2c（UDP 161）查 OID 1.3.6.1.2.1.43.10.2.1.4（prtMarkerLifeCount，累計值）；
-//   - 前後兩次相減得增量頁數（PageDelta）；
+// SNMP 查詢（v0.23 [D15] 修訂後）：
+//   - page counter：SNMP v2c（UDP 161）查 OID 1.3.6.1.2.1.43.10.2.1.4（prtMarkerLifeCount，
+//     壽命累計值），**原樣上送、不在本機相減**——差分與 counter 重置防呆皆移至後端
+//     （見 sensor.go；baseline 若只活在 Agent 本機，重裝／換機／佇列毀損即遺失）；
+//   - printer_serial：供 [D14] 缺口二的 per-printer 歸鍵用，依序試三個候選 OID：
+//     prtGeneralSerialNumber（Printer-MIB，首選）→ entPhysicalSerialNum（ENTITY-MIB，次選）
+//     → sysName（末選，管理員可改、不保證唯一）；可用 ECO_AGENT_PRINTER_SERIAL_OID 指定
+//     單一 OID 跳過候選鏈；
 //   - 目標位址／community 由環境變數提供，未設定時回 ErrNotConfigured 供上層優雅降級。
 //
-// 尚未落地（後續子項，見 CLAUDE.md §2 Step 3 表）：
-//   - 3.2 感測模式：page counter 無推播 → 只能輪詢；沿用 Step 2 的持久化時間戳到期判斷
-//     （lastPrinterPollAt，同掛 checkInterval），不可用絕對計時器；
-//   - 3.3 能耗換算與送出：payload {usage_date, print_pages}，走 HTTPS（[D13]，現階段 mock 送出）；
-//   - 3.4 BYOD 摩擦點：啟動時檢查與印表機同網段的連通性，不通則跳過並記 log。
+// 感測模式、送出與 BYOD 摩擦點見 sensor.go（3.2–3.4）。
 package printer
 
 import (
@@ -22,6 +23,7 @@ import (
 	"fmt"
 	"os"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/gosnmp/gosnmp"
@@ -37,6 +39,22 @@ const OIDPageCounterColumn = "1.3.6.1.2.1.43.10.2.1.4"
 // DefaultPageCounterOID 為絕大多數單機型號的 page counter instance。
 // 查不到時退回巡走整個欄（見 PageCounter），以相容 index 不為 1.1 的機種。
 const DefaultPageCounterOID = OIDPageCounterColumn + ".1.1"
+
+// 印表機序號的三個候選 OID（依序試，[D14] 缺口二：路徑 B 須以 printer_serial 而非
+// device_id 歸鍵，否則桌機＋筆電同指一台專屬印表機時頁數會重複計算）。
+const (
+	// OIDSerialPrtGeneralColumn 為 Printer-MIB 的 prtGeneralSerialNumber 欄（首選）。
+	OIDSerialPrtGeneralColumn = "1.3.6.1.2.1.43.5.1.1.17"
+	// DefaultSerialPrtGeneralOID 為絕大多數單機型號的序號 instance。
+	DefaultSerialPrtGeneralOID = OIDSerialPrtGeneralColumn + ".1"
+	// OIDSerialEntPhysicalColumn 為 ENTITY-MIB 的 entPhysicalSerialNum 欄（次選）。
+	OIDSerialEntPhysicalColumn = "1.3.6.1.2.1.47.1.1.1.1.11"
+	// DefaultSerialEntPhysicalOID 為第一個實體（多為印表機本體）的序號 instance。
+	DefaultSerialEntPhysicalOID = OIDSerialEntPhysicalColumn + ".1"
+	// OIDSysName 為 sysName（末選；純量本身即 instance，管理員可改、不保證唯一，
+	// 亦不套用巡走 fallback——巡走可能撈到系統群組內其他不相關欄位）。
+	OIDSysName = "1.3.6.1.2.1.1.5.0"
+)
 
 // SNMP 連線預設值。
 const (
@@ -64,6 +82,10 @@ const (
 	// EnvOID：page counter 的 instance OID（可選，預設 DefaultPageCounterOID）。
 	// 供 index 非 1.1、或改用廠商私有 counter 的機種覆寫。
 	EnvOID = "ECO_AGENT_PRINTER_OID"
+	// EnvSerialOID：印表機序號 OID（可選）。設定時只查此單一 OID（略過三候選 fallback
+	// 鏈），供 [D14] 歸鍵用；未設則依序試 prtGeneralSerialNumber → entPhysicalSerialNum
+	// → sysName。
+	EnvSerialOID = "ECO_AGENT_PRINTER_SERIAL_OID"
 )
 
 var (
@@ -73,15 +95,23 @@ var (
 	// ErrNoPageCounter 表示裝置有回應，但取不到可用的 page counter
 	// （OID 不存在且巡走 prtMarkerLifeCount 欄亦無結果）——多半不是印表機或未開啟 SNMP。
 	ErrNoPageCounter = errors.New("printer: no usable page counter (prtMarkerLifeCount) on target")
+	// ErrNoSerialNumber 表示三個候選 OID（或明確指定的單一 OID）皆查無序號。
+	// 呼叫端（sensor.go）應降級：省略 payload 的 printer_serial 欄位，由後端以
+	// device_id 回退歸鍵並標記「印表機身份不明」（[D14] 缺口二）。
+	ErrNoSerialNumber = errors.New("printer: no usable serial number (prtGeneralSerialNumber/entPhysicalSerialNum/sysName) on target")
 )
 
-// PageCounterSampler 抽象「取印表機累計頁數」，供 3.2 感測器以介面注入，便於測試
+// PageCounterSampler 抽象「取印表機累計頁數與序號」，供 3.2 感測器以介面注入，便於測試
 // （fake 或 MockAgent 滿足）並維持感測器對 SNMP 細節的最小依賴面。真實實作為 *SNMPClient。
+//
+// SerialNumber 供 [D14] 缺口二的 per-printer 歸鍵用；查無序號時回 ErrNoSerialNumber，
+// 由呼叫端決定降級方式（省略 payload 的 printer_serial 欄位）。
 type PageCounterSampler interface {
 	PageCounter(ctx context.Context) (int64, error)
+	SerialNumber(ctx context.Context) (string, error)
 }
 
-// SNMPClient 以 SNMP v2c 向個人專屬印表機查 page counter 累計值。
+// SNMPClient 以 SNMP v2c 向個人專屬印表機查 page counter 累計值與序號。
 //
 // 無狀態、每次查詢自建連線：印表機輪詢區間為分鐘級（printerPollInterval），
 // 常駐 UDP socket 無益處，反而在網路切換／印表機重啟後容易殘留失效狀態。
@@ -90,6 +120,7 @@ type SNMPClient struct {
 	port      uint16
 	community string
 	oid       string
+	serialOID string // 空字串＝走三候選 fallback 鏈（見 SerialNumber）；否則只查此 OID
 	timeout   time.Duration
 	retries   int
 }
@@ -120,6 +151,15 @@ func WithOID(oid string) Option {
 	return func(c *SNMPClient) {
 		if oid != "" {
 			c.oid = oid
+		}
+	}
+}
+
+// WithSerialOID 指定序號查詢改用單一 OID（略過 SerialNumber 預設的三候選 fallback 鏈）。
+func WithSerialOID(oid string) Option {
+	return func(c *SNMPClient) {
+		if oid != "" {
+			c.serialOID = oid
 		}
 	}
 }
@@ -172,6 +212,7 @@ func NewSNMPClientFromEnv(opts ...Option) (*SNMPClient, error) {
 	envOpts := []Option{
 		WithCommunity(os.Getenv(EnvCommunity)),
 		WithOID(os.Getenv(EnvOID)),
+		WithSerialOID(os.Getenv(EnvSerialOID)),
 	}
 	if p := os.Getenv(EnvPort); p != "" {
 		n, err := strconv.ParseUint(p, 10, 16)
@@ -188,12 +229,10 @@ func (c *SNMPClient) Target() (addr, oid string) {
 	return fmt.Sprintf("%s:%d", c.host, c.port), c.oid
 }
 
-// PageCounter 取得印表機目前的累計輸出頁數（prtMarkerLifeCount）。
-//
-// 先直接 GET 設定的 instance OID；若該 instance 不存在（noSuchInstance／noSuchObject，
-// 常見於 index 非 1.1 的機種），退回巡走 prtMarkerLifeCount 欄取第一筆可用值。
-// 兩者皆無回 ErrNoPageCounter；連線／逾時錯誤原樣包裝回傳，由呼叫端記 log 並下次輪詢重試。
-func (c *SNMPClient) PageCounter(ctx context.Context) (int64, error) {
+// connect 建立一次性 SNMP 連線。無狀態、每次查詢自建：印表機輪詢區間為分鐘級
+// （printerPollInterval），常駐 UDP socket 無益處，反而在網路切換／印表機重啟後
+// 容易殘留失效狀態。呼叫端負責 defer g.Conn.Close()。
+func (c *SNMPClient) connect(ctx context.Context) (*gosnmp.GoSNMP, error) {
 	g := &gosnmp.GoSNMP{
 		Context:   ctx,
 		Target:    c.host,
@@ -205,7 +244,22 @@ func (c *SNMPClient) PageCounter(ctx context.Context) (int64, error) {
 		MaxOids:   gosnmp.MaxOids,
 	}
 	if err := g.Connect(); err != nil {
-		return 0, fmt.Errorf("printer: connect %s:%d: %w", c.host, c.port, err)
+		return nil, fmt.Errorf("printer: connect %s:%d: %w", c.host, c.port, err)
+	}
+	return g, nil
+}
+
+// PageCounter 取得印表機目前的累計輸出頁數（prtMarkerLifeCount）。
+//
+// 原樣回傳壽命累計絕對值，**不在本機相減**——區間差分與 counter 重置防呆移至後端
+// （v0.23 [D15]，見 sensor.go）。先直接 GET 設定的 instance OID；若該 instance 不存在
+// （noSuchInstance／noSuchObject，常見於 index 非 1.1 的機種），退回巡走 prtMarkerLifeCount
+// 欄取第一筆可用值。兩者皆無回 ErrNoPageCounter；連線／逾時錯誤原樣包裝回傳，由呼叫端
+// 記 log 並下次輪詢重試。
+func (c *SNMPClient) PageCounter(ctx context.Context) (int64, error) {
+	g, err := c.connect(ctx)
+	if err != nil {
+		return 0, err
 	}
 	defer g.Conn.Close()
 
@@ -253,19 +307,99 @@ func counterValue(pdu gosnmp.SnmpPDU) (int64, bool) {
 	}
 }
 
-// PageDelta 由前後兩次 page counter 累計值算出這段期間的增量頁數（§2 Step 3.1「前後相減」）。
+// SerialNumber 取得印表機序號，供 [D14] 缺口二的 per-printer 歸鍵用。
 //
-// cur < prev 視為「counter 重置」——換機、主機板更換或韌體重置後累計值歸零。此時回 0，
-// 由呼叫端把 cur 存為新基準：寧可少算一段，也不可回填一個憑空的巨大頁數到員工帳上。
-// 同理 prev < 0（無基準，例如首次輪詢）回 0——首次只建立基準，不計增量。
-//
-// prtMarkerLifeCount 為 Counter32，理論上有 2^32 溢位；以個人印表機的實際輸出量計需數千年，
-// 不特別處理，一律以「重置」語意涵蓋。
-func PageDelta(prev, cur int64) int64 {
-	if prev < 0 || cur < prev {
-		return 0
+// 明確設定 serialOID（WithSerialOID／EnvSerialOID）時只查該單一 OID，不做候選鏈。
+// 否則依序試三個候選：prtGeneralSerialNumber（Printer-MIB，首選，GET 落空時巡走整欄，
+// 相容 index 非 1 的機種）→ entPhysicalSerialNum（ENTITY-MIB，次選，同樣巡走）→
+// sysName（末選，純量本身即 instance，管理員可改、不保證唯一，不套巡走——巡走可能撈到
+// 系統群組內其他不相關欄位）。三者皆查無值時回 ErrNoSerialNumber，由呼叫端決定降級方式。
+func (c *SNMPClient) SerialNumber(ctx context.Context) (string, error) {
+	if c.serialOID != "" {
+		v, err := c.getStringInstance(ctx, c.serialOID)
+		if err != nil {
+			return "", err
+		}
+		if v == "" {
+			return "", ErrNoSerialNumber
+		}
+		return v, nil
 	}
-	return cur - prev
+
+	if v, err := c.getStringWithWalkFallback(ctx, DefaultSerialPrtGeneralOID, OIDSerialPrtGeneralColumn); err == nil && v != "" {
+		return v, nil
+	}
+	if v, err := c.getStringWithWalkFallback(ctx, DefaultSerialEntPhysicalOID, OIDSerialEntPhysicalColumn); err == nil && v != "" {
+		return v, nil
+	}
+	if v, err := c.getStringInstance(ctx, OIDSysName); err == nil && v != "" {
+		return v, nil
+	}
+	return "", ErrNoSerialNumber
+}
+
+// getStringInstance 直接 GET 單一 OID 取字串值；查無值（而非連線失敗）回 ("", nil)，
+// 供候選鏈呼叫端判斷是否嘗試下一候選。
+func (c *SNMPClient) getStringInstance(ctx context.Context, oid string) (string, error) {
+	g, err := c.connect(ctx)
+	if err != nil {
+		return "", err
+	}
+	defer g.Conn.Close()
+	res, err := g.Get([]string{oid})
+	if err != nil {
+		return "", fmt.Errorf("printer: snmp get %s: %w", oid, err)
+	}
+	for _, pdu := range res.Variables {
+		if v, ok := stringValue(pdu); ok {
+			return v, nil
+		}
+	}
+	return "", nil
+}
+
+// getStringWithWalkFallback 先 GET instanceOID；不存在則巡走 column 欄取第一筆可用值
+// （比照 PageCounter 對 index 非 1 機種的相容做法）。查無值（而非連線失敗）回 ("", nil)。
+func (c *SNMPClient) getStringWithWalkFallback(ctx context.Context, instanceOID, column string) (string, error) {
+	g, err := c.connect(ctx)
+	if err != nil {
+		return "", err
+	}
+	defer g.Conn.Close()
+
+	if res, gerr := g.Get([]string{instanceOID}); gerr == nil {
+		for _, pdu := range res.Variables {
+			if v, ok := stringValue(pdu); ok {
+				return v, nil
+			}
+		}
+	}
+
+	pdus, werr := g.WalkAll(column)
+	if werr != nil {
+		return "", fmt.Errorf("printer: snmp walk %s: %w", column, werr)
+	}
+	for _, pdu := range pdus {
+		if v, ok := stringValue(pdu); ok {
+			return v, nil
+		}
+	}
+	return "", nil
+}
+
+// stringValue 由 SNMP varbind 取出可用的字串值（序號多為 OCTET STRING）。
+// noSuchObject／noSuchInstance／endOfMibView／null 等「無值」型別回 ok=false；
+// 空白字串（裝置回應存在但值為空）視為「無此值」。
+func stringValue(pdu gosnmp.SnmpPDU) (string, bool) {
+	if pdu.Type != gosnmp.OctetString {
+		return "", false
+	}
+	b, ok := pdu.Value.([]byte)
+	if !ok {
+		return "", false
+	}
+	s := strings.TrimSpace(string(b))
+	return s, s != ""
 }
 
 // 確保 SNMPClient 滿足 PageCounterSampler 介面。

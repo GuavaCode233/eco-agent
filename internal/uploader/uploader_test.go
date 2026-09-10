@@ -36,7 +36,7 @@ func newHarness(t *testing.T, cfg config.Config) *harness {
 	}
 	t.Cleanup(func() { q.Close() })
 
-	enr := enroll.New(platform.NewMemoryKeychain())
+	enr := enroll.New(platform.NewMemoryKeychain(), q)
 	if err := enr.EnsureBound(ctx); err != nil {
 		t.Fatalf("EnsureBound: %v", err)
 	}
