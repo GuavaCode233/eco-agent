@@ -25,7 +25,7 @@
 | 差旅核算 | 三軌上傳（高鐵票／計程車紙本／App 截圖），OCR＋GPT-4o NER，員工確認後送出 | 4.1 |
 | 廢棄物 | 員工掃桶上 QR 開 session → 投入 → App 點投入完畢；樹莓派匿名上傳、後端配對歸戶（A＋C＋D＋G 組合） | 4.2 |
 | 電梯 | 感測端採**被動 NFC tag**（各樓層電梯廳，不供電／不接觸電梯控制系統，主動式 ESP32 降級為未來增強路徑，[D5]）；手機掃描進出樓層、HTTPS 直送後端（不經 MQTT）；共乘採方案 B 固定單人分攤值（樓層差 × 上/下行單人係數，不感測人數、不拆總耗電），激勵帳與盤查帳分離 | 4.3 |
-| Eco-Agent | Go 開發；方案 B 手機掃碼綁定＋雙 token；本地持久化佇列＋四重觸發上傳；集中配置參數已定案（4.4.4）；電腦路徑改使用率加權、Agent 純感測後端計算（4.4 [D7]）；雲端儲存量取 `usageInDrive`、`usageInDriveTrash` 拆作激勵任務（4.4 [D8]）；雲端 PUE 採 Google fleet-wide 均值、每GB儲存能耗強度以硬碟規格反推（4.4 [D9]，係數值待查證）；路徑 C 應用場景四類盤點、趨勢/教育可放心做、讀檔案清單類待隱私決策（4.4 [D10]）；印表機 SNMP 五參數隨綁定本地設定、不走全域下發（4.4.2、[D11]）；`DIGITAL_USAGE` 採一路徑一列、`path_type` 由 Agent 明送（[D12]，ERD 已補 `path_type`／`drive_trash_gb`）；**三路徑全改 HTTPS、Agent 不再連 MQTT Broker**（[D13]）；冪等去重定案——`collected_at` 勝出規則、鍵粒度依路徑分三組（電腦 per-device／印表機 per-printer／雲端 per-account）（[D14]，ERD 已補 `device_id`／`collected_at`／`printer_serial`／`DEVICE.display_name`）；**印表機路徑改送 SNMP 累計讀數、差分移至後端**（[D15]，ERD 已補 `printer_page_counter`） | 4.4 |
+| Eco-Agent | Go 開發；方案 B 手機掃碼綁定＋雙 token；本地持久化佇列＋四重觸發上傳；集中配置參數已定案（4.4.4）；電腦路徑改使用率加權、Agent 純感測後端計算（4.4 [D7]）；雲端儲存量取 `usageInDrive`、`usageInDriveTrash` 拆作激勵任務（4.4 [D8]）；雲端 PUE 採 Google fleet-wide 均值、每GB儲存能耗強度以硬碟規格反推（4.4 [D9]，係數值待查證）；路徑 C 應用場景四類盤點、趨勢/教育可放心做、讀檔案清單類待隱私決策（4.4 [D10]）；印表機 SNMP 五參數隨綁定本地設定、不走全域下發（4.4.2、[D11]）；`DIGITAL_USAGE` 採一路徑一列、`path_type` 由 Agent 明送（[D12]，ERD 已補 `path_type`／`drive_trash_gb`）；**三路徑全改 HTTPS、Agent 不再連 MQTT Broker**（[D13]）；冪等去重定案——`collected_at` 勝出規則、鍵粒度依路徑分三組（電腦 per-device／印表機 per-printer／雲端 per-account）（[D14]，ERD 已補 `device_id`／`collected_at`／`printer_serial`／`DEVICE.display_name`）；**印表機路徑改送 SNMP 累計讀數、差分移至後端**（[D15]，ERD 已補 `printer_page_counter`）；**[D14] 缺口二與 [D15] 已於 Eco-Agent 程式碼落地**——`printer_serial` 依三候選 OID 依序讀取、查無時省略該欄位（不阻擋 `printer_page_counter` 入列），`printer_page_counter` 一律原樣送出、不在本機相減；`device_uuid`（4.4.2）亦已實作，首次呼叫時產生 UUID v4 並持久化於佇列 state 表 | 4.4 |
 | 印表機歸戶 | 優先開發「個人專屬機（Eco-Agent SNMP 輪詢歸戶）」與「手動上傳用紙量（App 主動感測、須搭誘因）」；共用機的 Print Server Log 與 Pull Printing API 列為可行、待實作測試；**歸鍵以印表機序號（`printer_serial`）而非 `device_id`**，防同一台印表機被兩台裝置重複計算（[D14]）；**手動上傳用紙量落地定案（[D16]）**——走 `POST /api/digital-usages`（App 員工 `Bearer`、PostgREST，非 Agent 的 `agent/digital-usage/batch`）、以新欄位 `sensing_mode`（`auto`／`manual`）區分自動與手動、App 端彙總後端一天一列、兩管道互斥（專屬機走自動／共用機走手動，無雙重計算） | 4.4、7 |
 | 綁定碼儲存 | 後端 `BINDING_CODE` 表持久化短效一次性碼（5 分鐘 TTL、消費即失效、過期即失效） | 4.4.2 |
 | QR 辨識 | 全系統統一 custom scheme URI；掃描一律開/用 App，App 依 URI host/path 分流動作 | 4.5 |
@@ -220,7 +220,7 @@
   - `path_type = drive`：drive_usage_gb（取自 `usageInDrive`）、drive_trash_gb（取自 `usageInDriveTrash`，供激勵任務用，見 [D8]）
   （電腦路徑改送原始量——active/idle 時數、平均 CPU 使用率、CPU 型號——不再送 `pc_tdp_w`；能耗由後端計算。`factor_id`／`co2e_kg` 屬後端查係數計算後寫入，**不在 Agent payload 內**。）
   - **`employee_id` 與 `device_id` 皆不在 payload 內**：Agent 只持有 `id_token`（4.4.2，per-device 一枚），後端以 `id_token` 查 `DEVICE_BINDING` 即**同時解出 `employee_id` 與 `device_id`** 二者並落庫。故 [D14] 將 `device_id` 納入電腦路徑唯一鍵一事，對 Agent payload 零改動。
-  - **惟 `printer_serial` 必須由 Agent 上送**：印表機序號是**本地網路事實**（同 [D11] 的 `HOST`／`OID`），後端無從得知某台桌機接的是哪台印表機，只能由 Agent 經 SNMP 讀出後隨資料上送。此為 [D14] 缺口二在路徑 B 上唯一需要動 payload 之處。
+  - **惟 `printer_serial` 必須由 Agent 上送**：印表機序號是**本地網路事實**（同 [D11] 的 `HOST`／`OID`），後端無從得知某台桌機接的是哪台印表機，只能由 Agent 經 SNMP 讀出後隨資料上送。此為 [D14] 缺口二在路徑 B 上唯一需要動 payload 之處。（Eco-Agent 已依此實作：查無序號時省略 `printer_serial` 欄位，`printer_page_counter` 一律原樣送出，見 4.4.2「序號讀取」條目。）
 - **手動上傳用紙量（App 路徑，非本 Agent 上傳，v26 [D16] 定案）**：印表機路徑 B 的備選來源「手動上傳用紙量」由**員工在 Eco-Sensing App 內輸入**，**不經 Eco-Agent、不走 `agent/digital-usage/batch`**，而是走既有的 **`POST /api/digital-usages`**（PostgREST 泛用 CRUD、App 員工 `Bearer`，`employee_id` 由 App Access Token 解出、不得於 body 指定）。落庫仍進 `DIGITAL_USAGE`，但以 **`sensing_mode = manual`** 與 Agent 自動路徑（`sensing_mode = auto`）區隔（見 [D16]）：
   - **App 端彙總、後端一天一列**：員工當日可多筆記錄、每筆於送出前在 App 本地編輯；App 以某觸發機制上傳**當日彙總後的總用紙量一筆**，後端只把該筆 upsert 進「該員工×該日×`printer`×`manual`」那一列。多筆去重與編輯皆在 App 端（送出前）完成，後端不存明細、不需 `event_id` 冪等、不需 asyncpg 條件式 upsert（見 [D16]、5.1）。
   - **落庫唯一鍵**：（`employee_id`, `usage_date`, `path_type`, `sensing_mode`）——`path_type = printer`、`sensing_mode = manual`；`printer_serial` 為 NULL（手動上傳無序號),故不套 SNMP 自動路徑的 per-printer 鍵，避開 `printer_serial` 為 NULL 的去重陷阱（見 [D16]、5.1 冪等去重）。
@@ -263,6 +263,8 @@ Eco-Agent 為無人值守背景程式，身份綁定採「**一次綁定、長�
 | ④ | `POST /api/agent/token/refresh` | Agent，帶 Refresh Token | 比對 `refresh_token_hash` 且 `status=active` → 發新 Access Token；已撤銷回 `401/403`（屬常駐階段，非綁定階段，但同屬本組端點且撤銷於此生效） |
 
 > **`DEVICE` 列的重複建立**：Agent 每次啟動若都呼叫 ①，綁定失敗（員工未掃、逾時）的殘留 `DEVICE` 列會持續累積。建議 Agent 於本機持久化一枚 `device_uuid`（與 4.4.3 的 SQLite 佇列同檔），索取綁定碼時帶上，後端據以 upsert `DEVICE` 而非盲插。
+>
+> **實作現況**：Eco-Agent 已實作 `device_uuid` 的產生與持久化——`Enroller.DeviceUUID()` 首次呼叫時以 UUID v4 產生一枚，寫入佇列的 state 表（與 `lastDriveQuotaCheckAt`／`lastPrinterPollAt` 同一機制），之後每次呼叫皆讀回同一值，跨重啟穩定不變；`bindLocked()` 已在（現仍為 mock 的）綁定流程一開始呼叫它，確保該值先於任何綁定嘗試存在。尚缺的只是「呼叫端點①時把它帶進 request body」這一步——待後端端點①就緒即可接上，Agent 端無需再改動。
 
 > 安全核心：Agent 全程**只接觸一次性 `binding_code`，不接觸員工帳密或員工 ID**；真正的身份驗證在已登入的手機 App 上完成，後端負責配對，符合「純感測、不碰個資」原則。
 
@@ -305,6 +307,7 @@ Eco-Agent 為無人值守背景程式，身份綁定採「**一次綁定、長�
 - **HOST 填法**：只填 IP 主機位址，不含 `http://`、埠或路徑（例：印表機網頁介面為 `http://192.168.1.162:80/WebServices/Device`，HOST 僅填 `192.168.1.162`；該 HTTP/WSD 介面與 SNMP UDP 161 無關，PORT 仍為 161）。
 - **讀值即累計頁數，差分在後端**（v0.23 [D15] 修訂）：SNMP page counter 為只增不減的壽命累計值。Agent **原樣上送該讀數**（`printer_page_counter`），不在本機相減；區間用量與「本次 < 上次視為計數器重置」的防呆一律由後端依歷史列判定（後端有完整歷史，判得更準且留得下稽核紀錄，並免除 baseline 只存於 Agent 本機、重裝即遺失的問題）。
 - **序號讀取（供 [D14] 歸鍵）**：綁定時與每次輪詢各讀一次 `printer_serial`。三個候選 OID 依序試——`1.3.6.1.2.1.43.5.1.1.17`（`prtGeneralSerialNumber`，Printer-MIB，首選）、`1.3.6.1.2.1.47.1.1.1.1.11`（`entPhysicalSerialNum`，ENTITY-MIB，次選）、`1.3.6.1.2.1.1.5.0`（`sysName`，末選，管理員可改、不保證唯一）。低階機種常三者皆回空值，屬**待實測項**；全空時回退以 `device_id` 歸鍵並將該列標記為「印表機身份不明」。**不以 `PRINTER_HOST`（IP）當鍵**——DHCP 會變，且不同辦公室的同段私有 IP 會誤撞。
+  - **實作現況**：Eco-Agent 已依三候選 OID 鏈實作序號讀取（含 `ECO_AGENT_PRINTER_SERIAL_OID` 單一 OID 覆寫、GET 落空時巡走整欄的相容處理），查無序號時 payload 省略該欄位。惟「綁定時讀一次」尚未落地——現階段綁定流程仍為 mock、不觸發任何 SNMP 呼叫，故序號目前只在每次輪詢時讀取；待接上真實綁定後端後再補上綁定時的讀取。「全空時回退以 `device_id` 歸鍵並標記」屬後端職責（Agent 從不持有 `device_id`），待後端就緒後才落地。
 - 綁定時可將非敏感的 `HOST`／`OID` 上報一份供 Web 後台監控裝置對應的印表機，但**不由後端反向下發覆蓋本地**，避免蓋掉正常的本地設定。輪詢區間 `printerPollInterval` 仍屬全域策略，走 5.2 下發（見 4.4.4）。
 
 ##### 4.4.3 資料上傳觸發模型：本地持久化佇列 + 多重觸發
