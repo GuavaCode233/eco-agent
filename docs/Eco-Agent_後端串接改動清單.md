@@ -1,6 +1,6 @@
 # Eco-Agent 後端串接改動清單
 
-> 本檔依據 `docs/Eco-Agent_後端串接需求清單_0910.md` 與 `docs/Eco-Agent_後端串接進度表.md`（權威版本，取代 0910 清單）整理出 Eco-Agent 程式碼側需要改動的具體位置。**本檔目前僅為分析/規劃文件，尚未進行任何程式碼修改**，供人工檢查後再決定是否執行。
+> 本檔依據 `docs/Eco-Agent_後端串接需求清單_0910.md` 與 `docs/Eco-Agent_後端串接進度表.md`（權威版本，取代 0910 清單）整理出 Eco-Agent 程式碼側需要改動的具體位置，並依開發順序表逐步落地；各章節內文完成後於文中標註「已落地」，進度以上方開發順序表的狀態欄為準。
 
 ## Context
 
@@ -18,9 +18,9 @@ Eco-Agent 目前三處為 mock：`internal/config`（sensor_config 常數）、`
 
 | 順序 | 對應章節 | 內容 | 狀態 |
 |------|----------|------|------|
-| 1 | §1 | 共用：後端 base URL 與 HTTP client 注入 | ⬜ |
+| 1 | §1 | 共用：後端 base URL 與 HTTP client 注入 | ✅ |
 | 2 | §2 | `internal/config`：sensor_config 真串（開機拉取一次，失敗 fallback 本地常數） | ⬜ |
-| 3 | §4 | `internal/platform`：真實 Keychain 實作（Windows DPAPI／macOS Keychain Services） | ⬜ |
+| 3 | §4 | `internal/platform`：真實 Keychain 實作（Windows DPAPI／macOS Keychain Services） | ✅ |
 | 4 | §3 | `internal/enroll`：綁定五端點真串（`Bind`／`refreshAccessTokenLocked`／`Unbind` 註解更新／測試改注入假後端） | ⬜ |
 | 5 | §5 | `internal/uploader`：上傳端點指向真實後端（base URL 組合、`TLSClientConfig` 視情況補） | ⬜ |
 | 6 | 驗證方式 | 端到端驗證（含撤銷路徑、Keychain 持久化、`go test ./...`） | ⬜ |
@@ -43,6 +43,15 @@ Eco-Agent 目前三處為 mock：`internal/config`（sensor_config 常數）、`
 - `POST {base}/api/agent/digital-usage/batch`（`internal/uploader/transport.go` 現有 `ECO_AGENT_UPLOAD_URL` 可繼續作為獨立覆寫，優先權高於 base URL 組合，維持與現有 mock server／測試的相容性）
 
 `internal/enroll/enroll.go` 目前沒有任何 HTTP client 欄位；仿照 `internal/uploader` 的 `Sender`/`WithSender` 模式，替 `Enroller` 加一個可注入的 HTTP 介面（例如 `BindingClient`），讓 `enroll_test.go` 能用 `httptest.Server` 假後端測試，不需真的連外部服務。
+
+**已落地**：
+
+- `internal/config/config.go`：新增 `EnvAPIBaseURL`（`ECO_AGENT_API_BASE_URL`）與 `Config.BaseURL`；`Load()` 依 profile 取預設值後以環境變數覆寫，`LoadProfile()` 維持純粹（不讀環境變數，供測試取得可預期的 profile 預設值）。
+- `internal/config/profiles.go`：`prodAPIBaseURL`／`testAPIBaseURL` 兩組預設值，分別對齊上方測試值／正式值。
+- `internal/config/endpoints.go`（新檔）：`PathSensorConfig`／`PathBindingCode`／`PathTokenRefresh`／`PathDigitalUsageBatch` 四個路徑常數、`PathBindingCodeToken(code)`（轉義後組出含 code 的路徑）、`Config.APIURL(path)`（組出完整端點，去除 BaseURL 尾端多餘 `/`）。此檔只提供組裝，**尚未被任何模組實際呼叫**——config 拉取（§2）、enroll 五端點（§3）、uploader 端點切換（§5）三步落地時才會用到。
+- `internal/enroll/enroll.go`：新增 `BindingClient` 介面（`Do(req) (*http.Response, error)`，`*http.Client` 天然滿足）、`Option`／`WithBindingClient`／`WithBaseURL`，`New()` 改為變參選項（向後相容，既有 7 處呼叫端不需改）並給預設 `httpClient`（`&http.Client{Timeout: 10s}`）。`Bind()`／`refreshAccessTokenLocked()` 仍是 mock，**尚未實際使用**此 client／baseURL——留給 §3 接線。
+- 測試：`internal/config/config_test.go` 新增 `TestBaseURLDefaultsPerProfile`／`TestLoadReadsEnvAPIBaseURL`／`TestAPIURL`；`internal/enroll/enroll_test.go` 新增 `TestWithBindingClientAndBaseURLInjectable`。
+- `.env.example`：補上 `ECO_AGENT_API_BASE_URL` 說明與預設值對照。
 
 ---
 
@@ -93,6 +102,15 @@ Eco-Agent 目前三處為 mock：`internal/config`（sensor_config 常數）、`
 - `keychain_darwin.go`（build tag `darwin`）：透過 cgo 呼叫 Security.framework Keychain Services（`SecItemAdd`/`SecItemCopyMatching`/`SecItemDelete`）存取系統鑰匙圈項目。
 - 依平台在 `cmd/eco-agent/main.go` 用 build tag 或 runtime 判斷選對實作（現在很可能是硬寫 `platform.NewMemoryKeychain()`，改成依平台選擇，非 Windows/macOS 平台維持 fallback 到記憶體並記 log 警告）。
 - 兩個新檔案各自需要對應的單元測試（可在對應平台的 CI 環境跑，或至少寫成能在本機手動驗證）。
+
+**已落地**：
+
+- `internal/platform/keychain_windows.go`（新檔，`//go:build windows`）：`windowsKeychain` 以 DPAPI（`golang.org/x/sys/windows` 的 `CryptProtectData`/`CryptUnprotectData`，`CRYPTPROTECT_UI_FORBIDDEN` 避免無頭背景常駐跳出系統提示）逐鍵加密，JSON 落地於 `newWindowsKeychain` 傳入的路徑（`NewOSKeychain()` 預設 `%LOCALAPPDATA%\eco-agent\credentials.dat`，`LOCALAPPDATA` 未設時退到 `os.UserConfigDir()`），寫入採「暫存檔 + rename」原子落地。
+- `internal/platform/keychain_darwin.go`（新檔，`//go:build darwin`，cgo）：`darwinKeychain` 依規格用 `SecItemAdd`/`SecItemCopyMatching`/`SecItemUpdate`/`SecItemDelete`（`kSecClassGenericPassword`，service 固定 `eco-agent`、account 即呼叫端傳入的 key），C 側收樣板邏輯（建 query dictionary、呼叫 SecItem*、轉 `CFTypeRef`）降低 cgo 邊界複雜度。**此檔未在本機驗證**——本開發環境是 Windows、無 macOS 工具鏈（`clang`/Xcode Command Line Tools），`GOOS=darwin CGO_ENABLED=1 go build` 在此環境必然因缺 C 編譯器而失敗，只做到 `gofmt` 格式檢查；正式視為完成前建議在實機 Mac 跑一次 `go build`/`go test`/`keychain-demo` 確認。
+- `internal/platform/keychain_other.go`（新檔，`//go:build !windows && !darwin`）：`NewOSKeychain()` fallback 到 `MemoryKeychain` 並用 `slog` 印警告（含 `runtime.GOOS`），對應「非 Windows/macOS 平台維持 fallback 並記警告」——已用 `GOOS=linux CGO_ENABLED=0 go build ./...` 驗證可編譯。
+- 統一入口 `platform.NewOSKeychain()`（各平台檔各自定義同名函式，build tag 互斥）供未來 `cmd/eco-agent/main.go`（目前尚未建立，見 §Context）呼叫；現有 demo 系列（`eco-agent-demo` 等）維持用 `platform.NewMemoryKeychain()`——它們刻意用暫存目錄佇列、每次重跑重新 mock 綁定，換成真實金鑰庫會在開發機的系統金鑰庫留下每次 demo 產生的假憑證，不是預期行為。
+- 新增 `cmd/keychain-demo`：對「這台機器上真實的系統金鑰庫」（而非 `MemoryKeychain`）做 Set/Get/Delete 往返 + 冪等驗證的獨立 demo（§V 慣例）。已在本機（Windows）實跑通過：Set/Get 值一致、Delete 後 `Get` 正確回 `ErrKeychainNotFound`。
+- 測試：`internal/platform/keychain_windows_test.go`（`//go:build windows`）涵蓋往返、找不到鍵、刪除冪等、跨實例持久化（模擬重啟）、多鍵互不干擾，並斷言落地檔案不含明文——已在本機以 `go test ./internal/platform/...` 全數通過。darwin 因同上原因無法在本機執行測試，僅完成寫作與格式檢查。
 
 ---
 

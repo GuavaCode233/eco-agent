@@ -27,6 +27,11 @@ const (
 // EnvProfile 是切換 profile 的環境變數名稱（一鍵切換正式／測試）。
 const EnvProfile = "ECO_AGENT_PROFILE"
 
+// EnvAPIBaseURL 覆寫後端 base URL 的環境變數；未設定時依 Profile 取預設值
+// （見 profiles.go 的 prodAPIBaseURL／testAPIBaseURL）。config／enroll／uploader
+// 三模組共用同一 base URL（見 docs/Eco-Agent_後端串接改動清單.md §1）。
+const EnvAPIBaseURL = "ECO_AGENT_API_BASE_URL"
+
 // Config 是 Eco-Agent 執行期使用的集中配置。
 //
 // 欄位分兩組：
@@ -37,6 +42,10 @@ const EnvProfile = "ECO_AGENT_PROFILE"
 type Config struct {
 	// Profile 標示本組數值來自哪個情境（production／testing）。
 	Profile Profile
+
+	// BaseURL 是後端 API 的共用 base URL；config／enroll／uploader 三模組各自在此之下
+	// 組出完整端點路徑（見 endpoints.go）。預設依 Profile 決定，可用 EnvAPIBaseURL 覆寫。
+	BaseURL string
 
 	// --- 裝置綁定（後端簽發策略；§4.4.2 / §4.4.4）---
 
@@ -76,7 +85,11 @@ type Config struct {
 // （HTTP GET sensor_config）並以版本號比對更新；拉取失敗時 fallback 到本檔常數，
 // 並保留上一版配置（見 v12 §7「開機是否強制拉取配置」待釐清項）。
 func Load() Config {
-	return LoadProfile(profileFromEnv())
+	cfg := LoadProfile(profileFromEnv())
+	if v := os.Getenv(EnvAPIBaseURL); v != "" {
+		cfg.BaseURL = v
+	}
+	return cfg
 }
 
 // LoadProfile 依指定 profile 回傳配置，供測試與明確指定情境使用。

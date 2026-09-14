@@ -3,6 +3,7 @@ package enroll
 import (
 	"context"
 	"errors"
+	"net/http"
 	"path/filepath"
 	"testing"
 	"time"
@@ -177,6 +178,44 @@ func TestDeviceUUIDStableAcrossCalls(t *testing.T) {
 	}
 	if id2 != id1 {
 		t.Fatalf("DeviceUUID 不穩定：第一次 %q，第二次 %q", id1, id2)
+	}
+}
+
+// fakeBindingClient 是測試用的假 BindingClient，僅記錄是否被呼叫；§1 目前無呼叫端會用到它
+// （見 BindingClient 註解），此測試僅驗證注入本身生效。
+type fakeBindingClient struct{ called bool }
+
+func (f *fakeBindingClient) Do(req *http.Request) (*http.Response, error) {
+	f.called = true
+	return nil, errors.New("fakeBindingClient: not implemented")
+}
+
+// TestWithBindingClientAndBaseURLInjectable 驗證 §1 鋪的 HTTP client／base URL 注入地基：
+// New() 預設帶一個可用的 httpClient，選項可覆寫成測試假實作（供 §3 落地後的 httptest 測試用）。
+func TestWithBindingClientAndBaseURLInjectable(t *testing.T) {
+	kc := platform.NewMemoryKeychain()
+	q, err := queue.Open(context.Background(), filepath.Join(t.TempDir(), "q.db"))
+	if err != nil {
+		t.Fatalf("queue.Open: %v", err)
+	}
+	t.Cleanup(func() { q.Close() })
+
+	// 預設值：httpClient 非 nil（可直接使用），baseURL 為空（由呼叫端以 WithBaseURL 指定）。
+	def := New(kc, q)
+	if def.httpClient == nil {
+		t.Fatal("default httpClient is nil, want non-nil default")
+	}
+	if def.baseURL != "" {
+		t.Fatalf("default baseURL = %q, want empty", def.baseURL)
+	}
+
+	fake := &fakeBindingClient{}
+	e := New(kc, q, WithBindingClient(fake), WithBaseURL("https://api.example.com"))
+	if e.httpClient != BindingClient(fake) {
+		t.Fatal("WithBindingClient did not inject the provided client")
+	}
+	if e.baseURL != "https://api.example.com" {
+		t.Fatalf("baseURL = %q, want injected value", e.baseURL)
 	}
 }
 

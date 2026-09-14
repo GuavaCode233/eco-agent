@@ -14,6 +14,9 @@ import "time"
 
 // --- 正式值（v12 §4.4.4 定案）---
 const (
+	// prodAPIBaseURL 為正式後端 base URL（docs/Eco-Agent_後端串接改動清單.md §1）。
+	prodAPIBaseURL = "https://uie47061-eco-sensing-backend.hf.space"
+
 	// TODO(backend): 由 5.2 集中配置服務（sensor_config）下發。
 	prodBindingCodeTTL = 5 * time.Minute
 	// TODO(backend): 由 5.2 集中配置服務（sensor_config）下發。
@@ -39,6 +42,9 @@ const (
 
 // --- 測試值（縮短時間類參數，落在 v12 §4.4.4 測試建議值範圍內）---
 const (
+	// testAPIBaseURL 指向本機後端（供測試 profile 一鍵切換）。
+	testAPIBaseURL = "http://127.0.0.1:7860"
+
 	testBindingCodeTTL  = 1 * time.Minute     // 建議 1 分鐘
 	testAccessTokenExp  = 3 * time.Minute     // 建議 2–5 分鐘
 	testRefreshTokenExp = prodRefreshTokenExp // 無測試值，沿用正式值
@@ -56,6 +62,7 @@ const (
 func productionConfig() Config {
 	return Config{
 		Profile:                     ProfileProduction,
+		BaseURL:                     prodAPIBaseURL,
 		BindingCodeTTL:              prodBindingCodeTTL,
 		AccessTokenExp:              prodAccessTokenExp,
 		RefreshTokenExp:             prodRefreshTokenExp,
@@ -73,6 +80,7 @@ func productionConfig() Config {
 func testingConfig() Config {
 	return Config{
 		Profile:                     ProfileTesting,
+		BaseURL:                     testAPIBaseURL,
 		BindingCodeTTL:              testBindingCodeTTL,
 		AccessTokenExp:              testAccessTokenExp,
 		RefreshTokenExp:             testRefreshTokenExp,

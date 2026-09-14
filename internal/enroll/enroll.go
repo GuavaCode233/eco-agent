@@ -39,6 +39,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net/http"
 	"sync"
 	"time"
 
@@ -80,11 +81,26 @@ var (
 	ErrRevoked = errors.New("enroll: credentials revoked")
 )
 
+// BindingClient 是 enroll 依賴的 HTTP 介面，供 §3 綁定流程（索取 binding_code／輪詢核銷／
+// 換發 Access Token）呼叫後端；*http.Client 天然滿足此介面。測試可注入假實作（例如包一層
+// httptest.Server 的 client）取代直接打外部服務，不需真的連後端。
+//
+// TODO(backend): 現階段尚無呼叫端使用此介面——Bind()／refreshAccessTokenLocked 仍為 mock
+// （見各自函式註解）。本介面與 WithBindingClient／WithBaseURL 是 §1（共用 base URL 與 HTTP
+// client 注入）先鋪的地基，實際串接於 §3 落地（docs/Eco-Agent_後端串接改動清單.md）。
+type BindingClient interface {
+	Do(req *http.Request) (*http.Response, error)
+}
+
 // Enroller 提供身份憑證存取，並封裝綁定／撤銷生命週期。並行安全。
 type Enroller struct {
 	mu sync.Mutex
 	kc platform.Keychain
 	q  *queue.Queue
+
+	// httpClient／baseURL：§3 綁定五端點真串所需的 HTTP 存取，現階段未被 Bind() 使用。
+	httpClient BindingClient
+	baseURL    string
 
 	// Access Token 於記憶體快取（不落金鑰庫；短期、可隨時由 Refresh Token 換發）。
 	accessToken       string
@@ -96,10 +112,33 @@ type Enroller struct {
 	now func() time.Time
 }
 
+// Option 客製化 Enroller。
+type Option func(*Enroller)
+
+// WithBindingClient 覆寫綁定流程用的 HTTP client（測試注入 httptest.Server 或假實作）。
+func WithBindingClient(c BindingClient) Option {
+	return func(e *Enroller) { e.httpClient = c }
+}
+
+// WithBaseURL 設定後端 base URL（索取/查詢/換發 token 的端點組裝依據；見 config.Config.BaseURL
+// 與 config.Config.APIURL）。
+func WithBaseURL(base string) Option {
+	return func(e *Enroller) { e.baseURL = base }
+}
+
 // New 建立 Enroller，憑證經指定金鑰庫存取；device_uuid（§4.4.2）與持久化佇列同檔存放，
 // 故需傳入該佇列（呼叫端應先 queue.Open 再建立 Enroller）。
-func New(kc platform.Keychain, q *queue.Queue) *Enroller {
-	return &Enroller{kc: kc, q: q, now: time.Now}
+func New(kc platform.Keychain, q *queue.Queue, opts ...Option) *Enroller {
+	e := &Enroller{
+		kc:         kc,
+		q:          q,
+		now:        time.Now,
+		httpClient: &http.Client{Timeout: 10 * time.Second},
+	}
+	for _, o := range opts {
+		o(e)
+	}
+	return e
 }
 
 // DeviceUUID 回傳本機持久化的裝置識別碼；不存在則產生一枚（UUID v4）並寫入佇列 state 表。
