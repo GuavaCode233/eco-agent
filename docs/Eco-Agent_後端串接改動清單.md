@@ -21,7 +21,7 @@ Eco-Agent 目前三處為 mock：`internal/config`（sensor_config 常數）、`
 | 1 | §1 | 共用：後端 base URL 與 HTTP client 注入 | ✅ |
 | 2 | §2 | `internal/config`：sensor_config 真串（開機拉取一次，失敗 fallback 本地常數） | ✅ |
 | 3 | §4 | `internal/platform`：真實 Keychain 實作（Windows DPAPI／macOS Keychain Services） | ✅ |
-| 4 | §3 | `internal/enroll`：綁定五端點真串（`Bind`／`refreshAccessTokenLocked`／`Unbind` 註解更新／測試改注入假後端） | ⬜ |
+| 4 | §3 | `internal/enroll`：綁定五端點真串（`Bind`／`refreshAccessTokenLocked`／`Unbind` 註解更新／測試改注入假後端） | ✅ |
 | 5 | §5 | `internal/uploader`：上傳端點指向真實後端（base URL 組合、`TLSClientConfig` 視情況補） | ⬜ |
 | 6 | 驗證方式 | 端到端驗證（含撤銷路徑、Keychain 持久化、`go test ./...`） | ⬜ |
 
@@ -98,6 +98,13 @@ Eco-Agent 目前三處為 mock：`internal/config`（sensor_config 常數）、`
 ### 3.4 測試
 
 `enroll_test.go` 的 `TestEnsureBoundThenTokens`、`TestAccessTokenRefreshOnExpiry` 目前斷言 mock 常數，改用注入的假 HTTP client／`httptest.Server` 模擬五端點回應（pending→consumed、401 refresh 等），驗證真實流程下的狀態轉換與 Keychain 寫入。
+
+**已落地**（含一項對原規劃的調整，見下方說明）：
+
+- **設計調整——真實流程改為「有設定 base URL 才啟用」，而非直接取代 mock**：規劃原文假設 `Bind()`／`refreshAccessTokenLocked` 直接換成真實 HTTP 流程，但 repo 目前有 6 支 demo（`all-paths-demo`／`computer-demo`／`drive-sensor-demo`／`eco-agent-demo`／`printer-demo`／`printer-sensor-demo`）與 `uploader_test.go` 都呼叫 `enroll.New(platform.NewMemoryKeychain(), q)`（不帶 base URL），且 CLAUDE.md 明確要求「每步驟都要能獨立執行與測試」；若無條件換成真實流程，這些完全不依賴後端的 demo 會在第一次 `EnsureBound` 就對空字串 URL 發請求失敗、當場全部跑不動。因此改為：`bindLocked`／`refreshAccessTokenLocked` 檢查 `e.baseURL`——非空才走 `enroll_http.go` 的真實五端點流程，為空（`New()` 預設值，未呼叫 `WithBaseURL`）則維持原本的 mock 捷徑（`bindMockLocked`，邏輯與原本完全相同）。7 個既有呼叫端因此零改動、零回歸；真正要接後端時，未來的 `cmd/eco-agent/main.go`（目前尚未建立）只需在建構 `Enroller` 時加 `enroll.WithBaseURL(cfg.BaseURL)`（可再選配 `enroll.WithBindingCodeTTL(cfg.BindingCodeTTL)`）即可切換到真實流程，不需要再改 `enroll` 套件本身。
+- `internal/enroll/enroll_http.go`（新檔）：五端點的 wire 格式與 HTTP 往返（`requestBindingCode`／`pollBindingCodeToken`／`refreshAccessTokenHTTP`／`bindRealLocked`，共用 `doJSON` helper），端點路徑直接重用 §1 的 `config.PathBindingCode`／`PathBindingCodeToken`／`PathTokenRefresh`／`Config.APIURL`（`enroll` 因此新增對 `config` 套件的依賴；`config` 不依賴 `enroll`，無循環）。輪詢邏輯：逾時上限取 `min(bindingCodeTTL 推算的 deadline, 伺服器回的 expires_at)`（`expires_at` 解析失敗僅記警告、不影響逾時判斷），輪詢間隔另可用 `WithBindingCodePollInterval` 覆寫（供測試縮短）。
+- `internal/enroll/enroll.go`：`Bind()`／`bindLocked`／`refreshAccessTokenLocked` 依上述改為分派；新增 `bindMockLocked`（原 mock 邏輯原封不動搬過來）。`refreshAccessTokenLocked` 收到 401/403 時呼叫 `clearLocked()`（不是 `ClearCredentials()`）並回 `ErrNotBound`——刻意不設 `revoked` 終止態，因為這不是上傳路徑偵測到的撤銷，只是「這份 refresh token 死了、需要重綁」，下次 `EnsureBound` 會因 `isBoundLocked()`==false 自動重新 `Bind()`。`Unbind` 的舊 TODO 註解已依規劃改為說明撤銷為被動偵測、本函式僅清本機憑證即符合設計，未新增 HTTP 呼叫。新增 `Option`：`WithBindingCodeTTL`、`WithBindingCodePollInterval`、`WithLogger`（QR URI 走這個 logger，預設 `slog.Default()`）。
+- 測試：**`TestEnsureBoundThenTokens`／`TestAccessTokenRefreshOnExpiry` 未改動**——因為上述設計調整後，這兩個測試（不設定 base URL）驗證的正是「mock 捷徑路徑」，仍然有效、且與原本語意一致，不需要為了「不再是暫時 mock」而重寫。改為在新檔 `internal/enroll/enroll_http_test.go` 新增 5 個測試專門涵蓋真實 HTTP 流程：`TestBindRealFlowSuccessAfterPending`（pending 數次後 consumed，驗證四個憑證正確落地＋`X-Device-Secret` header 正確帶上）、`TestBindRealFlowTimesOutWhenAlwaysPending`（一直 pending 到逾時，驗證回錯誤且不落地任何憑證）、`TestBindRealFlowBindingCodeRequestFails`（端點①回 500，驗證直接失敗、不進入輪詢）、`TestRefreshAccessTokenHTTPSuccess`（端點④成功換發）、`TestRefreshAccessTokenHTTP401ClearsCredentialsNotRevoked`（端點④回 401，驗證清憑證但 `revoked` 仍為 `false`）。全數以 `httptest.Server` + Go 1.22+ 的 `ServeMux` 方法/萬用字元路由模擬後端，不連真實網路，已在本機以 `go test ./internal/enroll/...` 全數通過（含原有測試，共 13 個測試、約 0.25 秒跑完）。
 
 ---
 

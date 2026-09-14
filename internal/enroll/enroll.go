@@ -3,14 +3,16 @@
 // 綁定採「一次綁定、長期常駐、雙向可解除」的裝置註冊，歸戶的 employee_id 由此建立。
 // Agent 全程只持有不可逆的 ID Token，不直接持有員工 ID（純感測、不碰個資）。
 //
-// 現階段後端不存在，故本套件以 mock 實作（§7）：
-//   - IDToken()／AccessToken()／RefreshToken() 回傳 mock 常數；
-//   - 但憑證一律經 platform.Keychain 金鑰庫抽象存取（Refresh Token 不寫純文字檔，§1），
-//     日後換真值只改 keychain 實作與 Bind() 內容，不動本套件對外結構；
-//   - device_uuid（DeviceUUID）已真實落地（非 mock）：與後端無關、純本機識別碼產生與
-//     持久化，日後接後端只需在索取 binding_code 時把它塞進 request body。
+// 綁定五端點真串（docs/Eco-Agent_後端串接改動清單.md §3）：Bind()／refreshAccessTokenLocked
+// 依是否以 WithBaseURL 設定後端 base URL 分兩條路：
+//   - 已設定 base URL：走下方完整綁定規格的真實 HTTP 流程（見 enroll_http.go）。
+//   - 未設定（baseURL 為空字串，New() 預設值）：維持 mock 捷徑（bindMockLocked／mock 常數），
+//     供無後端環境的獨立 demo／測試沿用，不需另起假伺服器（見 §7 mock 慣例）。
 //
-// ── 完整綁定規格（供日後實作對照，現不落地後端側）──────────────────────────────
+// 憑證一律經 platform.Keychain 金鑰庫抽象存取（Refresh Token 不寫純文字檔，§1）。
+// device_uuid（DeviceUUID）與後端無關、純本機識別碼產生與持久化，索取 binding_code 時帶上。
+//
+// ── 完整綁定規格 ────────────────────────────────────────────────────────────
 //
 // 綁定階段流程（§4.4.2）：
 //  1. Agent 向後端索取一次性 binding_code（短效），**帶上本機持久化的 device_uuid**
@@ -18,7 +20,8 @@
 //     後端於 BINDING_CODE 表建立記錄（status=pending、created_at、
 //     expires_at = created_at + bindingCodeTTL(5 分)、device_id 指向本裝置）。
 //  2. Agent 將 binding_code 編入 QR Code 顯示（內容為全系統統一 custom scheme URI，
-//     見 v12 §4.5，例：ecosensing://bind?code=<binding_code>）。
+//     見 v12 §4.5，例：ecosensing://bind?code=<binding_code>）；本階段先以 log 印出 URI，
+//     不做 QR 圖檔/ASCII 渲染。
 //  3. 員工以已登入的 Eco-Sensing App 掃碼；App 依 URI host/path 判定為綁定動作。
 //  4. App 把「已驗證身份 + binding_code」送後端。
 //  5. 後端核對 binding_code（status=pending 且 expires_at > now()）→ 建立 device_binding
@@ -31,6 +34,8 @@
 //   - Refresh Token：長期（90 天），存金鑰庫；後端僅存 refresh_token_hash；不輪換，到期重走綁定。
 //   - 撤銷：採「每次上傳夾帶」（不另做心跳）；後端於上傳回應夾帶有效性狀態，若已撤銷回 401/403，
 //     Agent 收到即自我清除憑證（含金鑰庫 Refresh Token）、停止上傳（見 ClearCredentials）。
+//     refreshAccessTokenLocked 換發時若後端回 401/403（refresh token 已失效/裝置已撤銷），語意
+//     不同：僅清本機憑證、不設終止態，讓上層下次 EnsureBound 自動重新 Bind()（見該函式註解）。
 //
 // ─────────────────────────────────────────────────────────────────────────────
 package enroll
@@ -39,6 +44,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
 	"net/http"
 	"sync"
 	"time"
@@ -81,26 +87,31 @@ var (
 	ErrRevoked = errors.New("enroll: credentials revoked")
 )
 
-// BindingClient 是 enroll 依賴的 HTTP 介面，供 §3 綁定流程（索取 binding_code／輪詢核銷／
-// 換發 Access Token）呼叫後端；*http.Client 天然滿足此介面。測試可注入假實作（例如包一層
-// httptest.Server 的 client）取代直接打外部服務，不需真的連後端。
-//
-// TODO(backend): 現階段尚無呼叫端使用此介面——Bind()／refreshAccessTokenLocked 仍為 mock
-// （見各自函式註解）。本介面與 WithBindingClient／WithBaseURL 是 §1（共用 base URL 與 HTTP
-// client 注入）先鋪的地基，實際串接於 §3 落地（docs/Eco-Agent_後端串接改動清單.md）。
+// BindingClient 是 enroll 依賴的 HTTP 介面，供綁定流程（索取 binding_code／輪詢核銷／
+// 換發 Access Token，見 enroll_http.go）呼叫後端；*http.Client 天然滿足此介面。測試可注入
+// httptest.Server 的 client 取代直接打外部服務。
 type BindingClient interface {
 	Do(req *http.Request) (*http.Response, error)
 }
 
 // Enroller 提供身份憑證存取，並封裝綁定／撤銷生命週期。並行安全。
 type Enroller struct {
-	mu sync.Mutex
-	kc platform.Keychain
-	q  *queue.Queue
+	mu  sync.Mutex
+	kc  platform.Keychain
+	q   *queue.Queue
+	log *slog.Logger
 
-	// httpClient／baseURL：§3 綁定五端點真串所需的 HTTP 存取，現階段未被 Bind() 使用。
+	// httpClient／baseURL：綁定五端點真串所需的 HTTP 存取（見 enroll_http.go）。baseURL 為空
+	// （未呼叫 WithBaseURL）時 bindLocked／refreshAccessTokenLocked 走 mock 捷徑，不發任何請求
+	// ——供無後端環境的獨立 demo／測試沿用（見套件頂部註解）。
 	httpClient BindingClient
 	baseURL    string
+
+	// bindingCodeTTL：輪詢核銷 binding_code 的逾時上限（§3.1 步驟 3）；預設對齊
+	// config.Config 正式值，呼叫端應以 WithBindingCodeTTL(cfg.BindingCodeTTL) 帶入實際配置。
+	bindingCodeTTL time.Duration
+	// bindingCodePollInterval：輪詢間隔；測試可縮短以加速。
+	bindingCodePollInterval time.Duration
 
 	// Access Token 於記憶體快取（不落金鑰庫；短期、可隨時由 Refresh Token 換發）。
 	accessToken       string
@@ -121,19 +132,38 @@ func WithBindingClient(c BindingClient) Option {
 }
 
 // WithBaseURL 設定後端 base URL（索取/查詢/換發 token 的端點組裝依據；見 config.Config.BaseURL
-// 與 config.Config.APIURL）。
+// 與 config.Config.APIURL）。留空（不呼叫本選項）則 Bind()／refreshAccessTokenLocked 走 mock
+// 捷徑，見套件頂部註解。
 func WithBaseURL(base string) Option {
 	return func(e *Enroller) { e.baseURL = base }
+}
+
+// WithBindingCodeTTL 覆寫輪詢核銷 binding_code 的逾時上限；應帶入 config.Config.BindingCodeTTL。
+func WithBindingCodeTTL(d time.Duration) Option {
+	return func(e *Enroller) { e.bindingCodeTTL = d }
+}
+
+// WithBindingCodePollInterval 覆寫輪詢核銷 binding_code 的間隔（測試用，縮短以加速）。
+func WithBindingCodePollInterval(d time.Duration) Option {
+	return func(e *Enroller) { e.bindingCodePollInterval = d }
+}
+
+// WithLogger 設定日誌器（QR URI 等綁定流程訊息輸出至此）。
+func WithLogger(l *slog.Logger) Option {
+	return func(e *Enroller) { e.log = l }
 }
 
 // New 建立 Enroller，憑證經指定金鑰庫存取；device_uuid（§4.4.2）與持久化佇列同檔存放，
 // 故需傳入該佇列（呼叫端應先 queue.Open 再建立 Enroller）。
 func New(kc platform.Keychain, q *queue.Queue, opts ...Option) *Enroller {
 	e := &Enroller{
-		kc:         kc,
-		q:          q,
-		now:        time.Now,
-		httpClient: &http.Client{Timeout: 10 * time.Second},
+		kc:                      kc,
+		q:                       q,
+		log:                     slog.Default(),
+		now:                     time.Now,
+		httpClient:              &http.Client{Timeout: 10 * time.Second},
+		bindingCodeTTL:          5 * time.Minute, // 對齊 config 正式值；建議以 WithBindingCodeTTL 覆寫
+		bindingCodePollInterval: 2 * time.Second,
 	}
 	for _, o := range opts {
 		o(e)
@@ -204,9 +234,9 @@ func (e *Enroller) EnsureBound(ctx context.Context) error {
 
 // Bind 執行裝置綁定流程並將憑證存入金鑰庫。
 //
-// TODO(backend): 目前為 mock——直接把 mock 雙 token 與 ID Token 寫入金鑰庫，模擬綁定完成。
-// 後端就緒後，改為實作本檔頂部註解的完整流程：索取 binding_code → 顯示 custom scheme
-// URI QR（§4.5）→ 等 App 掃碼 → 後端發雙 token → 存金鑰庫。介面（本方法簽章）維持不變。
+// 若已用 WithBaseURL 設定後端 base URL，走本檔頂部註解的完整流程（索取 binding_code →
+// log 印出 custom scheme URI QR → 輪詢等 App 掃碼核銷 → 存金鑰庫，見 enroll_http.go）；
+// 否則維持 mock 捷徑（供無後端環境的獨立 demo／測試沿用）。介面（本方法簽章）不受影響。
 func (e *Enroller) Bind(ctx context.Context) error {
 	e.mu.Lock()
 	defer e.mu.Unlock()
@@ -217,12 +247,22 @@ func (e *Enroller) Bind(ctx context.Context) error {
 }
 
 func (e *Enroller) bindLocked(ctx context.Context) error {
-	// 真實流程於索取 binding_code（端點①）時應帶上 device_uuid（§4.4.2）；先在此確保
-	// 已產生並落地，即使目前的 mock 綁定尚未真的送出任何請求。
-	if _, err := e.deviceUUIDLocked(ctx); err != nil {
+	// 真實與 mock 流程皆須先確保 device_uuid 已產生並落地（§4.4.2：索取 binding_code
+	// 端點①應帶上此值）。
+	deviceUUID, err := e.deviceUUIDLocked(ctx)
+	if err != nil {
 		return err
 	}
-	// MOCK: 略過 binding_code 索取／QR／App 掃碼／後端換 token，直接落地 mock 憑證。
+	if e.baseURL == "" {
+		// MOCK: 未設定後端 base URL，略過 binding_code 索取／QR／App 掃碼／後端換 token，
+		// 直接落地 mock 憑證（見套件頂部註解）。
+		return e.bindMockLocked()
+	}
+	return e.bindRealLocked(ctx, deviceUUID)
+}
+
+// bindMockLocked 是無後端 base URL 時的綁定捷徑：直接寫入固定 mock 憑證。
+func (e *Enroller) bindMockLocked() error {
 	if err := e.kc.Set(keyIDToken, mockIDToken); err != nil {
 		return fmt.Errorf("enroll: store id token: %w", err)
 	}
@@ -286,11 +326,14 @@ func (e *Enroller) AccessToken(ctx context.Context) (string, error) {
 	return e.accessToken, nil
 }
 
-// refreshAccessTokenLocked 以金鑰庫中的 Refresh Token 換發新的 Access Token。
+// refreshAccessTokenLocked 以金鑰庫中的 Refresh Token 換發新的 Access Token（§3.2）。
 //
-// TODO(backend): 目前為 mock——確認 Refresh Token 存在後直接回 mock Access Token。
-// 後端就緒後改為 HTTP 呼叫換發端點（帶 Refresh Token），效期由後端回應決定。
-func (e *Enroller) refreshAccessTokenLocked(_ context.Context) error {
+// 若已設定後端 base URL，呼叫 POST token/refresh（enroll_http.go）；後端回 401/403
+// （refresh token 已失效／裝置已撤銷）時清本機憑證並回 ErrNotBound，讓上層下次
+// EnsureBound 自動重新 Bind()——不設 ClearCredentials 的終止態，因為這不是上傳路徑
+// 偵測到的撤銷，僅是「這份 refresh token 死了、需要重綁」。
+// 未設定 base URL 時維持 mock 捷徑（回 mock Access Token），供無後端環境沿用。
+func (e *Enroller) refreshAccessTokenLocked(ctx context.Context) error {
 	rt, err := e.kc.Get(keyRefreshToken)
 	if errors.Is(err, platform.ErrKeychainNotFound) {
 		return ErrNotBound
@@ -298,10 +341,31 @@ func (e *Enroller) refreshAccessTokenLocked(_ context.Context) error {
 	if err != nil {
 		return fmt.Errorf("enroll: refresh access token: %w", err)
 	}
-	_ = rt // MOCK: 真實流程會帶 rt 呼叫後端換發端點。
-	e.accessToken = mockAccessToken
-	e.accessTokenExpiry = e.now().Add(mockAccessTokenTTL)
-	return nil
+
+	if e.baseURL == "" {
+		// MOCK: 未設定後端 base URL，直接回 mock Access Token。
+		e.accessToken = mockAccessToken
+		e.accessTokenExpiry = e.now().Add(mockAccessTokenTTL)
+		return nil
+	}
+
+	out, status, err := e.refreshAccessTokenHTTP(ctx, rt)
+	if err != nil {
+		return fmt.Errorf("enroll: refresh access token: %w", err)
+	}
+	switch status {
+	case http.StatusOK:
+		e.accessToken = out.AccessToken
+		e.accessTokenExpiry = e.now().Add(time.Duration(out.ExpiresIn) * time.Second)
+		return nil
+	case http.StatusUnauthorized, http.StatusForbidden:
+		if cerr := e.clearLocked(); cerr != nil {
+			return fmt.Errorf("enroll: refresh access token: revoked (status %d), clear credentials: %w", status, cerr)
+		}
+		return ErrNotBound
+	default:
+		return fmt.Errorf("enroll: refresh access token: unexpected status %d", status)
+	}
 }
 
 // ClearCredentials 撤銷自清：清除金鑰庫憑證與記憶體 Access Token，並標記為已撤銷（終止態）。
@@ -334,10 +398,11 @@ func (e *Enroller) clearLocked() error {
 
 // Unbind 員工端主動解除綁定（換機）：清本機憑證，但不設終止態——之後可再次綁定。
 //
-// TODO(backend): 真實流程尚須通知後端標記解綁（device_binding → revoked）。現僅清本機。
+// 不呼叫後端解綁端點（POST device-bindings/{id}/revoke）：該端點是管理端觸發的動作，
+// 不是 Agent 呼叫的——Agent 側撤銷偵測已正確掛在上傳回應 401/403（見 ClearCredentials）。
+// 本函式僅清本機憑證即符合設計（docs/Eco-Agent_後端串接改動清單.md §3.3）。
 func (e *Enroller) Unbind(ctx context.Context) error {
 	e.mu.Lock()
 	defer e.mu.Unlock()
-	// TODO(backend): 呼叫後端解綁端點通知標記 revoked。
 	return e.clearLocked()
 }
