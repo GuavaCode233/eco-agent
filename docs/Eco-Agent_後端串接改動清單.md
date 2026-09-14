@@ -22,7 +22,7 @@ Eco-Agent 目前三處為 mock：`internal/config`（sensor_config 常數）、`
 | 2 | §2 | `internal/config`：sensor_config 真串（開機拉取一次，失敗 fallback 本地常數） | ✅ |
 | 3 | §4 | `internal/platform`：真實 Keychain 實作（Windows DPAPI／macOS Keychain Services） | ✅ |
 | 4 | §3 | `internal/enroll`：綁定五端點真串（`Bind`／`refreshAccessTokenLocked`／`Unbind` 註解更新／測試改注入假後端） | ✅ |
-| 5 | §5 | `internal/uploader`：上傳端點指向真實後端（base URL 組合、`TLSClientConfig` 視情況補） | ⬜ |
+| 5 | §5 | `internal/uploader`：上傳端點指向真實後端（base URL 組合、`TLSClientConfig` 視情況補） | ✅ |
 | 6 | 驗證方式 | 端到端驗證（含撤銷路徑、Keychain 持久化、`go test ./...`） | ⬜ |
 
 ---
@@ -134,6 +134,14 @@ Eco-Agent 目前三處為 mock：`internal/config`（sensor_config 常數）、`
 - `MockHTTPSender` 的邏輯（組 JSON、帶 `Authorization: Bearer <access_token>`、只讀 status code）已經符合後端規格，**不需要改資料流程**；可考慮改名成不含「Mock」字樣的名稱（例如 `HTTPSender`）以反映它現在也是正式路徑，但這是 cosmetic，非必須。
 - `http.Client` 目前沒有另外設定 TLS——Go 預設會用系統憑證存放區驗證 HTTPS，正式後端若用一般受信任 CA 簽發的憑證，理論上不需額外程式碼；若後端用自簽憑證則需額外補 `TLSClientConfig`（視實際部署環境決定，先不假設）。
 - `Response` struct 維持只有 `StatusCode`（呼應 §2，版本號夾帶機制延至 P2，不現在做）。
+
+**已落地**：
+
+- `internal/uploader/uploader.go` 的 `New()`：端點解析改為三段優先序——① `ECO_AGENT_UPLOAD_URL` 環境變數（不變，供本機 mock server／測試沿用，優先權最高）；② 皆未設時，若 `cfg.BaseURL` 非空，組出 `cfg.APIURL(config.PathDigitalUsageBatch)`（新，即真實後端端點）；③ 以上皆空（`cfg` 為零值等異常情形）才退到 `DefaultUploadURL` 這個本機 mock 常數兜底。`transport.go` 的 `DefaultUploadURL`／`EnvUploadURL` 常數本身不變，只更新了上方註解說明新的優先序與各自角色。
+- **`MockHTTPSender` 未改名**：規劃文字本就標記這是 cosmetic、非必須；確認除 `uploader` 套件內部（`transport.go` 定義、`uploader.go` 使用）外無任何外部引用後，決定不做這個無功能影響的改名，避免無謂 diff。
+- **TLS 未動**：規劃本就寫明「視實際部署環境決定，先不假設」；正式後端憑證是否為受信任 CA 簽發尚未確認（見 §6.2 開放問題），`http.Client` 沿用 Go 預設（系統憑證存放區），未加 `TLSClientConfig`。
+- **零回歸確認**：檢查過 `internal/uploader` 全部既有呼叫端（`all-paths-demo`／`computer-demo`／`drive-sensor-demo`／`eco-agent-demo`／`printer-sensor-demo`，共 5 個 demo）皆已明確用 `WithUploadURL(ts.URL+"/mock/ingest")` 指向各自的 in-process mock server，完全不受 `New()` 預設端點變動影響——這次調整只影響「呼叫端沒有指定端點」時的預設行為，屬新增分支、非改動既有路徑。
+- 測試（新檔 `internal/uploader/default_url_test.go`）：`TestNewDefaultUploadURLFromBaseURL`（無環境變數、`cfg.BaseURL` 非空 → 組出 digital-usage/batch 端點）、`TestNewEnvUploadURLTakesPriorityOverBaseURL`（環境變數優先於 `cfg.BaseURL`）、`TestNewFallsBackToDefaultUploadURLWhenBaseURLEmpty`（兩者皆空 → 退到 `DefaultUploadURL`）。皆直接建構 `Uploader` 並斷言內部 `*MockHTTPSender.url`（同套件測試，未發送任何請求），加上既有 9 個 uploader 測試（共 12 個），已在本機以 `go test ./internal/uploader/...` 全數通過。
 
 ---
 

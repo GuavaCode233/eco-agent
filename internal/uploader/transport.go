@@ -26,11 +26,14 @@ import (
 // 專案層級的混合協定架構仍成立（廢棄物樹莓派續走 MQTT），只是分流判準由「是不是 IoT 裝置」
 // 修正為「需不需要後端的回應」——Eco-Agent 需要回程資訊，故全走 HTTPS。
 
-// 上傳端點設定（§7）。
+// 上傳端點設定（docs/Eco-Agent_後端串接改動清單.md §5）。New() 決定實際端點的優先順序：
+//  1. EnvUploadURL 環境變數（供本機 mock server／測試沿用，見 cmd/mock-ingest）；
+//  2. cfg.BaseURL 非空時，組出 {base}/api/agent/digital-usage/batch（見 config.PathDigitalUsageBatch）；
+//  3. 以上皆無（cfg 為零值等異常情形）時，退到 DefaultUploadURL 這個本機 mock 端點兜底。
 const (
-	// EnvUploadURL 覆寫 mock 上傳端點的環境變數。
+	// EnvUploadURL 覆寫上傳端點的環境變數；優先權高於 cfg.BaseURL 組出的端點。
 	EnvUploadURL = "ECO_AGENT_UPLOAD_URL"
-	// DefaultUploadURL 為預設 mock 端點（本機 mock server，見 cmd/mock-ingest）。
+	// DefaultUploadURL 是 cfg.BaseURL 也為空時的最後備援端點（本機 mock server，見 cmd/mock-ingest）。
 	DefaultUploadURL = "http://localhost:8080/mock/ingest"
 )
 

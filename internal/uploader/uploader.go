@@ -99,9 +99,14 @@ func WithShutdownTimeout(d time.Duration) Option {
 	return func(u *Uploader) { u.shutdownTimeout = d }
 }
 
-// New 建立 Uploader。上傳端點取自環境變數 ECO_AGENT_UPLOAD_URL，預設 DefaultUploadURL（§7）。
+// New 建立 Uploader。上傳端點依序取：環境變數 ECO_AGENT_UPLOAD_URL → cfg.BaseURL 組出的
+// digital-usage/batch 端點 → DefaultUploadURL 兜底（見 transport.go；docs/Eco-Agent_後端
+// 串接改動清單.md §5）。
 func New(q Queue, creds Credentials, cfg config.Config, opts ...Option) *Uploader {
 	url := os.Getenv(EnvUploadURL)
+	if url == "" && cfg.BaseURL != "" {
+		url = cfg.APIURL(config.PathDigitalUsageBatch)
+	}
 	if url == "" {
 		url = DefaultUploadURL
 	}
