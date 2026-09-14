@@ -19,7 +19,7 @@ Eco-Agent 目前三處為 mock：`internal/config`（sensor_config 常數）、`
 | 順序 | 對應章節 | 內容 | 狀態 |
 |------|----------|------|------|
 | 1 | §1 | 共用：後端 base URL 與 HTTP client 注入 | ✅ |
-| 2 | §2 | `internal/config`：sensor_config 真串（開機拉取一次，失敗 fallback 本地常數） | ⬜ |
+| 2 | §2 | `internal/config`：sensor_config 真串（開機拉取一次，失敗 fallback 本地常數） | ✅ |
 | 3 | §4 | `internal/platform`：真實 Keychain 實作（Windows DPAPI／macOS Keychain Services） | ✅ |
 | 4 | §3 | `internal/enroll`：綁定五端點真串（`Bind`／`refreshAccessTokenLocked`／`Unbind` 註解更新／測試改注入假後端） | ⬜ |
 | 5 | §5 | `internal/uploader`：上傳端點指向真實後端（base URL 組合、`TLSClientConfig` 視情況補） | ⬜ |
@@ -62,6 +62,13 @@ Eco-Agent 目前三處為 mock：`internal/config`（sensor_config 常數）、`
 - 進度表明確說明「版本比對 + 只在版本不符時重拉」機制延至 P2（DB 表未建），因此**這次只做「開機拉取一次」**，不用實作版本比對或從上傳回應夾帶版本號的機制——`internal/uploader` 的 `Response` struct 維持只有 `StatusCode`，不需改動。
 - `Config` struct 欄位本身已與回應 1:1 對應，不需改結構；只換 `Load()` 內部實作。
 - 移除/更新 `config.go` 與 `profiles.go` 中各參數上的 `TODO(backend)` 標記為已完成，或改標「P2：版本比對」視情況保留。
+
+**已落地**：
+
+- `internal/config/sensor_config.go`（新檔）：`fetchSensorConfig(baseURL)` 對 `{base}/api/agent/sensor_config` 發 `GET`（逾時 `sensorConfigTimeout`=5s），解析 `sensorConfigResponse`（11 個欄位，命名與進度表一致；`version` 只接收不使用，版本比對延至 P2）；`applySensorConfig` 把秒數欄位換算 `time.Duration` 覆蓋進 `Config`。
+- `config.go` 的 `Load()`：取 profile 本機常數為 baseline → 套用 `EnvAPIBaseURL` 覆寫 → 呼叫 `fetchSensorConfig`；任何失敗（建構請求、連線、非 200、JSON 解析）記一行 `slog` warning 並直接回傳 baseline（不覆蓋、不崩潰）；成功則覆蓋。`LoadProfile()` 維持不變（不拉取，供測試/demo 需要確定性數值時使用）。
+- `profiles.go`：移除逐參數重複的 `TODO(backend)` 註解，改在檔頭一次說明「這組常數現為 `Load()` 拉取失敗時的 fallback」；`prodPrinterPollInterval` 待實測定案的提醒保留。
+- 測試（`internal/config/sensor_config_test.go`，新檔）：`init()` 把套件層級的 `sensorConfigHTTPClient` 換成一個永遠立即失敗的 `RoundTripper`，讓所有測試（含既有 `TestLoadReadsEnvProfile` 等）預設「網路已停用」，不會意外打到 `prodAPIBaseURL`/`testAPIBaseURL` 這類真實位址；想測試「拉取成功」的案例改用 `withSensorConfigServer` 明確指向 `httptest.Server`。涵蓋：拉取成功覆蓋數值、連線失敗 fallback、非 200 fallback、JSON 格式錯誤 fallback，皆已在本機以 `go test ./internal/config/...` 通過（測試全程無真實網路存取，數十毫秒內跑完）。
 
 ---
 

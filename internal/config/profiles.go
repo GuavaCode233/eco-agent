@@ -9,35 +9,26 @@ import "time"
 //
 // 同步提醒：正式值屬「複製關係」，v12 §4.4.4 若改動任一值，本檔須一併同步。
 //
-// 每一參數皆標 TODO(backend)：日後由 5.2 集中配置服務（sensor_config）下發，
-// 本檔常數退居為拉取失敗時的內建預設值。
+// 這組常數現為 Load() 向 5.2 集中配置服務（sensor_config）拉取失敗時的 fallback 預設值
+// （見 sensor_config.go；docs/Eco-Agent_後端串接改動清單.md §2）；拉取成功則以回應覆蓋。
+// PrinterPollInterval 正式值待實測，暫定 300 秒。
 
 // --- 正式值（v12 §4.4.4 定案）---
 const (
 	// prodAPIBaseURL 為正式後端 base URL（docs/Eco-Agent_後端串接改動清單.md §1）。
 	prodAPIBaseURL = "https://uie47061-eco-sensing-backend.hf.space"
 
-	// TODO(backend): 由 5.2 集中配置服務（sensor_config）下發。
-	prodBindingCodeTTL = 5 * time.Minute
-	// TODO(backend): 由 5.2 集中配置服務（sensor_config）下發。
-	prodAccessTokenExp = 1 * time.Hour
-	// TODO(backend): 由 5.2 集中配置服務（sensor_config）下發。
+	prodBindingCodeTTL  = 5 * time.Minute
+	prodAccessTokenExp  = 1 * time.Hour
 	prodRefreshTokenExp = 90 * 24 * time.Hour // 90 天，到期重綁、不輪換
 
-	// TODO(backend): 由 5.2 集中配置服務（sensor_config）下發。
 	prodComputerUsageRecordInterval = 60 * time.Second
-	// TODO(backend): 由 5.2 集中配置服務（sensor_config）下發。
-	prodDriveQuotaInterval = 24 * time.Hour
-	// TODO(backend): 由 5.2 集中配置服務（sensor_config）下發。
-	prodCheckInterval = 60 * time.Second
-	// TODO(backend): 由 5.2 集中配置服務（sensor_config）下發。
-	prodThresholdCount = 60
-	// TODO(backend): 由 5.2 集中配置服務（sensor_config）下發。
-	prodMaxAge = 24 * time.Hour
-	// TODO(backend): 由 5.2 集中配置服務（sensor_config）下發；正式值待實測，暫定 300 秒。
-	prodPrinterPollInterval = 300 * time.Second
-	// TODO(backend): 由 5.2 集中配置服務（sensor_config）下發。
-	prodUploadBatchMax = 720
+	prodDriveQuotaInterval          = 24 * time.Hour
+	prodCheckInterval               = 60 * time.Second
+	prodThresholdCount              = 60
+	prodMaxAge                      = 24 * time.Hour
+	prodPrinterPollInterval         = 300 * time.Second // 待實測定案
+	prodUploadBatchMax              = 720
 )
 
 // --- 測試值（縮短時間類參數，落在 v12 §4.4.4 測試建議值範圍內）---
