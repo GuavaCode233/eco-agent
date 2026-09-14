@@ -12,7 +12,7 @@
 | 1 | 集中配置 | `GET /api/agent/sensor_config`，回傳 11 參數＋`version`（寫死常數，不建表，P2 才做真正的 policy 表） | 替換 `internal/config` mock：開機呼叫此端點，解析回應覆蓋本機預設值 | ✅ 後端已實作 |
 | 2 | 索取綁定碼（①） | `POST /api/agent/binding-code`：body `{device_uuid}`，回 `{code, device_secret, expires_at}`；以 `device_uuid` 作為 `device.id` 直接 upsert（不新增欄位） | 替換 `internal/enroll` mock：呼叫①並帶上已持久化的 `device_uuid`（`Enroller.DeviceUUID()` 已實作），收下 `code`／`device_secret`／`expires_at` | ✅ 後端已實作，⬜ Agent 端待接 |
 | 3 | App 掃碼核銷（②） | `POST /api/agent/bind`（App 呼叫，非 Agent；`Authorization: Bearer <App access token>`，body **僅** `{code}`，不接受 `employee_id`） | 無（Agent 只需把 `code` 編入 QR 顯示，後續動作在③） | ✅ 後端已實作（App 端串接不在本次範圍） |
-| 4 | Agent 領取 token（③） | `GET /api/agent/binding-code/{code}/token`（header `X-Device-Secret`）；`status=consumed` 時**現場**呼叫 `mint_tokens_for_binding_code` 簽發 Access/Refresh（見下方「後端內部設計備註」） | 替換 mock：帶 `code`＋`X-Device-Secret` 輪詢至 `status=consumed`，取得 `access_token`／`refresh_token` 寫入系統金鑰庫（Refresh Token 走 DPAPI/Keychain，不落地純文字） | ✅ 後端已實作，⬜ Agent 端待接 |
+| 4 | Agent 領取 token（③） | `GET /api/agent/binding-code/{code}/token`（header `X-Device-Secret`）；`status=consumed` 時**現場**呼叫 `mint_tokens_for_binding_code` 簽發 Access/Refresh，並一併回傳 `device_binding.id_token`（見下方「後端內部設計備註」） | 替換 mock：帶 `code`＋`X-Device-Secret` 輪詢至 `status=consumed`，取得 `access_token`／`refresh_token`／`id_token`，前兩者寫入系統金鑰庫（Refresh Token 走 DPAPI/Keychain，不落地純文字），`id_token` 供⑦批次上傳 payload 使用 | ✅ 後端已實作，⬜ Agent 端待接 |
 | 5 | Access Token 換發（④） | `POST /api/agent/token/refresh`（body `{refresh_token}`），效期以 `device_binding.bound_at + 90天` 推算 | 替換 `internal/enroll.go:254` 的 no-op stub，改為定期呼叫此端點換發 | ✅ 後端已實作，⬜ Agent 端待接 |
 | 6 | 撤銷／解綁（⑤） | `POST /api/agent/device-bindings/{device_binding_id}/revoke`（管理端觸發，非 Agent；呼叫者與認證**未決議**，比照既有 `revoke-sessions` 端點先求可用） | 無需新增邏輯——Agent 側撤銷偵測走上傳回應 `401`/`403` 自清憑證，`internal/enroll.go:299` 已有清本機金鑰庫的部分 | ✅ 後端已實作 |
 | 7 | 批次上傳 | `POST /api/agent/digital-usage/batch`（asyncpg 條件式 upsert＋印表機差分/重置邏輯，`sensing_mode='auto'`） | 替換 `internal/uploader` mock URL（`transport.go:101`）為正式端點與 TLS 設定，`Uploader` 邏輯本身不需更動 | ✅ 後端已實作，⬜ Agent 端待接、⬜ 待對真實 Supabase 執行個體跑通驗證 |
@@ -32,8 +32,8 @@ Request: `{"code": str}`（不可帶 `employee_id`）
 Response: `{"status": "consumed"}`
 
 ### ③ `GET /api/agent/binding-code/{code}/token`（header `X-Device-Secret: <device_secret>`）
-Response（`pending`）：`{"status": "pending", "access_token": null, "refresh_token": null, "expires_in": null}`
-Response（`consumed`）：`{"status": "consumed", "access_token": str, "refresh_token": str, "token_type": "bearer", "expires_in": 3600}`
+Response（`pending`）：`{"status": "pending", "access_token": null, "refresh_token": null, "expires_in": null, "id_token": null}`
+Response（`consumed`）：`{"status": "consumed", "access_token": str, "refresh_token": str, "token_type": "bearer", "expires_in": 3600, "id_token": "<device_binding.id_token>"}`
 
 ### ④ `POST /api/agent/token/refresh`（無 Bearer，body 帶 refresh token）
 Request: `{"refresh_token": str}`

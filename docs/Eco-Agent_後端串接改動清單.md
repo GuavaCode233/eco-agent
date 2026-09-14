@@ -12,6 +12,19 @@ Eco-Agent 目前三處為 mock：`internal/config`（sensor_config 常數）、`
 
 已與使用者確認的方向：本次也一併補上真實 Keychain 實作（Windows DPAPI／macOS Keychain Services），因為 mock 的 `MemoryKeychain` 無法真的撐住 90 天 Refresh Token；QR 顯示先以 log 印出 `ecosensing://bind?code=...` URI 為主，不做 ASCII/圖檔渲染。
 
+## 開發順序表
+
+> 依相依關係排序，非依章節編號順序：§1 是三個模組共用的基礎，須最先落地；§4 Keychain 需先於 §3 enroll（enroll 要把真實 token 寫進去才有意義）；§5 uploader 排最後，因為它要驗證的是 enroll 產出的真實 access token 能否打通上傳。**狀態欄圖例**沿用 `CLAUDE.md` §2 慣例：⬜ 未開始 ／ 🟡 進行中 ／ ✅ 完成 ／ ⏸️ 暫緩。每完成一步，除更新本表，也請同步更新對應章節內文的完成情形。
+
+| 順序 | 對應章節 | 內容 | 狀態 |
+|------|----------|------|------|
+| 1 | §1 | 共用：後端 base URL 與 HTTP client 注入 | ⬜ |
+| 2 | §2 | `internal/config`：sensor_config 真串（開機拉取一次，失敗 fallback 本地常數） | ⬜ |
+| 3 | §4 | `internal/platform`：真實 Keychain 實作（Windows DPAPI／macOS Keychain Services） | ⬜ |
+| 4 | §3 | `internal/enroll`：綁定五端點真串（`Bind`／`refreshAccessTokenLocked`／`Unbind` 註解更新／測試改注入假後端） | ⬜ |
+| 5 | §5 | `internal/uploader`：上傳端點指向真實後端（base URL 組合、`TLSClientConfig` 視情況補） | ⬜ |
+| 6 | 驗證方式 | 端到端驗證（含撤銷路徑、Keychain 持久化、`go test ./...`） | ⬜ |
+
 ---
 
 ## 1. 共用：後端 base URL 與 HTTP client 注入
@@ -52,7 +65,7 @@ Eco-Agent 目前三處為 mock：`internal/config`（sensor_config 常數）、`
 1. `POST /api/agent/binding-code`，body `{"device_uuid": <DeviceUUID()>}`（`DeviceUUID()` 已是真實實作，不需改）→ 解析 `{code, device_secret, expires_at}`。
 2. Log 印出 `ecosensing://bind?code=<code>` 供人工顯示／轉發給 App 掃碼（本次不做 QR 渲染，純文字 log）。
 3. 輪詢 `GET /api/agent/binding-code/{code}/token`，header `X-Device-Secret: <device_secret>`，直到 `status=consumed` 或 `expires_at` 到期（用 `bindingCodeTTL` 作輪詢逾時上限，逾時回錯誤讓上層重新走 `Bind`）。
-4. `status=consumed` 時取得 `access_token`／`refresh_token`（**`id_token` 欄位是否在此回應中，見 §6 分析**，需要在實作前確認，不要憑空假設欄位名稱）。
+4. `status=consumed` 時取得 `access_token`／`refresh_token`／`id_token`（③ 回應已確認直接帶 `"id_token": "<device_binding.id_token>"`，§6.1 開放問題已解決，不需 JWT 解碼繞路）。
 5. 把 `refresh_token`、`id_token` 寫入 Keychain（沿用現有 `keyIDToken`/`keyRefreshToken`），`access_token` 連同 `expires_in` 換算的到期時間存入記憶體快取（沿用現有 `accessToken`/`accessTokenExpiry` 欄位）。
 
 `device_secret`／`code` 只在 `Bind()` 執行期間存於記憶體，不落地；若 Agent 在綁定完成前重啟，視為綁定失敗，需重新呼叫 `Bind()`（重新索取新 binding_code）——這是可接受的簡化，因為 `bindingCodeTTL` 本身就短（5 分鐘量級）。
@@ -94,26 +107,32 @@ Eco-Agent 目前三處為 mock：`internal/config`（sensor_config 常數）、`
 
 ## 6. 待跟後端確認的開放問題（不阻塞規劃，但要在實作前/中對齊）
 
-### 6.1 `id_token` 從何取得（核心開放問題）
+### 6.1 `id_token` 從何取得 — ✅ 已解決
 
-批次上傳 payload 需要頂層 `id_token` 欄位（[D12]/[D14] 的去識別化設計：不帶 `employee_id`/`device_id`，只帶不可逆的 `id_token`），但進度表 ③ `GET /api/agent/binding-code/{code}/token` 的 `consumed` 回應範例只列出：
+原本的疑慮：批次上傳 payload 需要頂層 `id_token` 欄位（[D12]/[D14] 的去識別化設計：不帶 `employee_id`/`device_id`，只帶不可逆的 `id_token`），但進度表初版 ③ `GET /api/agent/binding-code/{code}/token` 的回應範例只列出 `access_token`/`refresh_token`，沒有 `id_token`，一度懷疑要另外用 JWT 解碼 `access_token` 才能取得。
+
+**現況（進度表已更新）**：③ 端點的兩種回應都已直接補上 `id_token` 欄位：
 
 ```json
-{"status": "consumed", "access_token": str, "refresh_token": str, "token_type": "bearer", "expires_in": 3600}
+// pending
+{"status": "pending", "access_token": null, "refresh_token": null, "expires_in": null, "id_token": null}
+// consumed
+{"status": "consumed", "access_token": str, "refresh_token": str, "token_type": "bearer", "expires_in": 3600, "id_token": "<device_binding.id_token>"}
 ```
 
-沒有 `id_token`。
+因此 §3.1 步驟 4 的實作直接從 `consumed` 回應解析 `id_token` 即可，**不需要 JWT 解碼繞路**。先前分析中「Eco-Agent `access_token` 是否為 JWT、能否比照 App 端 `get_current_employee` 解碼取值」的討論仍具參考價值（保留於下方供追溯），但已非本次實作所需路徑。
 
-**為什麼後端需要 `id_token`？**
-[D12] 的設計哲學是「明確欄位、不做伺服器端推斷」——即便後端理論上可以從 Bearer token 反查出裝置/員工身分，批次上傳端點的 request schema 仍要求客戶端在 body 頂層明確帶 `id_token`，這是刻意的 API 形狀（用於冪等鍵 `event_id = id_token|usage_date|path_type` 與 `DEVICE_BINDING` 查找），不是圖方便。所以不論後端內部能否從別的管道解出身分，**Agent 都必須自己知道自己的 `id_token` 數值**才能組出這個欄位。
+<details>
+<summary>保留：先前的 JWT 解碼分析（已非必要路徑，僅供追溯）</summary>
 
-**`id_token` 能否從 `access_token` 解出？**
-進度表「後端內部設計備註」提到 Access Token 是「無狀態 JWT，重簽無副作用」——這是一個強烈的訊號：Access Token 很可能是一個 JWT，而且其 payload 裡大概率帶有能識別 `device_binding` 的 claim（例如 `sub`＝`device_binding_id`，或直接就是 `id_token`）。若是如此，Agent 可以自己 base64 解碼 JWT 的 payload segment 取出這個 claim（**不需要驗證簽章，這只是讀 claim，不是安全敏感操作**），完全不需要後端額外開欄位。
+參考 `Eco-Sensing_App_驗證機制_開發參考.md` 後，曾確認兩點：
 
-**建議查證順序（實作前先做，不用等後端排程）**：
-1. 先查後端 ③ 端點的實際 OpenAPI schema／Pydantic response model，確認 `consumed` 回應是否真的沒有 `id_token` 欄位（進度表的 JSON 範例可能只是節錄，不代表完整欄位列表）。
-2. 若確認沒有，再拿一枚真實 `access_token` 樣本做 JWT 解碼，檢查 payload 是否帶有 `id_token` 或可對應到 `id_token` 的 claim。
-3. 兩者都查不到，才需要正式跟後端提出「③ 回應需補一個 `id_token` 欄位」的需求。
+1. App 的 `access_token` 明確是 JWT（§4.2：`"access_token": "<JWT>"`），且該文件 §1 明講「與 Eco-Agent 雙 token 同構，差別僅觸發情境」——與進度表「Access Token 為無狀態 JWT，重簽無副作用」的描述互相印證，兩者應是同一套後端 token 簽發機制。
+2. 但 App 的識別方式（`employee_id` 完全由後端從 Bearer token 解出、從不出現在 body）與 Eco-Agent 的 `id_token`（刻意留在 payload 裡的欄位，[D12]）不是同一種模式；且 `internal/queue.EventID` 在感測當下就需要 `id_token`，這個時間點不保證 `access_token` 有效，所以無論能否從 JWT 解出，都必須把 `id_token` 獨立持久化在 Keychain。JWT 解碼至多只能是 `Bind()` 當下取值的備援管道之一。
+
+既然 ③ 回應已直接給欄位，這條備援路徑不需要走。
+
+</details>
 
 ### 6.2 其他開放問題
 
