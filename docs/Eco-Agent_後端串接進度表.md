@@ -8,13 +8,14 @@
 
 | # | 項目 | 後端事項 | Eco-Agent 事項（對應現有 mock） | 狀態 |
 |---|------|---------|--------------------------------|------|
-| 0 | DB schema | migration `0004_agent_binding_secret_and_printer_fallback.sql`：`binding_code.device_secret_hash`、`digital_usage.printer_identity_unknown`＋對應 partial unique index | 無 | ✅ 已完成（程式碼），⬜ 待實際套用到 Supabase 執行個體 |
+| 0 | DB schema | migration `0004_agent_binding_secret_and_printer_fallback.sql`：`binding_code.device_secret_hash`、`digital_usage.printer_identity_unknown`＋對應 partial unique index；migration `0005_device_binding_single_active.sql`：收斂既有重複 active 綁定＋`uq_device_binding_active_device`（一台裝置至多一筆 active） | 無 | ✅ 已完成（程式碼），⬜ 待實際套用到 Supabase 執行個體（0004、0005） |
 | 1 | 集中配置 | `GET /api/agent/sensor_config`，回傳 11 參數＋`version`（寫死常數，不建表，P2 才做真正的 policy 表） | 替換 `internal/config` mock：開機呼叫此端點，解析回應覆蓋本機預設值 | ✅ 後端已實作 |
 | 2 | 索取綁定碼（①） | `POST /api/agent/binding-code`：body `{device_uuid}`，回 `{code, device_secret, expires_at}`；以 `device_uuid` 作為 `device.id` 直接 upsert（不新增欄位） | 替換 `internal/enroll` mock：呼叫①並帶上已持久化的 `device_uuid`（`Enroller.DeviceUUID()` 已實作），收下 `code`／`device_secret`／`expires_at` | ✅ 後端已實作，⬜ Agent 端待接 |
 | 3 | App 掃碼核銷（②） | `POST /api/agent/bind`（App 呼叫，非 Agent；`Authorization: Bearer <App access token>`，body **僅** `{code}`，不接受 `employee_id`） | 無（Agent 只需把 `code` 編入 QR 顯示，後續動作在③） | ✅ 後端已實作（App 端串接不在本次範圍） |
 | 4 | Agent 領取 token（③） | `GET /api/agent/binding-code/{code}/token`（header `X-Device-Secret`）；`status=consumed` 時**現場**呼叫 `mint_tokens_for_binding_code` 簽發 Access/Refresh，並一併回傳 `device_binding.id_token`（見下方「後端內部設計備註」） | 替換 mock：帶 `code`＋`X-Device-Secret` 輪詢至 `status=consumed`，取得 `access_token`／`refresh_token`／`id_token`，前兩者寫入系統金鑰庫（Refresh Token 走 DPAPI/Keychain，不落地純文字），`id_token` 供⑦批次上傳 payload 使用 | ✅ 後端已實作，⬜ Agent 端待接 |
 | 5 | Access Token 換發（④） | `POST /api/agent/token/refresh`（body `{refresh_token}`），效期以 `device_binding.bound_at + 90天` 推算 | 替換 `internal/enroll.go:254` 的 no-op stub，改為定期呼叫此端點換發 | ✅ 後端已實作，⬜ Agent 端待接 |
-| 6 | 撤銷／解綁（⑤） | `POST /api/agent/device-bindings/{device_binding_id}/revoke`（管理端觸發，非 Agent；呼叫者與認證**未決議**，比照既有 `revoke-sessions` 端點先求可用） | 無需新增邏輯——Agent 側撤銷偵測走上傳回應 `401`/`403` 自清憑證，`internal/enroll.go:299` 已有清本機金鑰庫的部分 | ✅ 後端已實作 |
+| 6 | 遠端撤銷（⑤） | `POST /api/agent/device-bindings/{device_binding_id}/revoke`（App 呼叫，`Authorization: Bearer <App access token>`；**現階段僅限本人**，非本人的綁定回 404）；另有 `GET /api/agent/device-bindings` 列出本人綁定（不含 `id_token`／`refresh_token_hash`）。企業端／IT 撤銷他人裝置待企業端認證（驗證機制端點關係表 §4.1）定案後補上 | 無需新增邏輯——Agent 側撤銷偵測走上傳回應 `401`/`403` 自清憑證，`internal/enroll.go:299` 已有清本機金鑰庫的部分 | ✅ 後端已實作（本人範圍），⬜ 企業端撤銷待 §4.1 |
+| 6.1 | 員工端解綁 | `POST /api/agent/unbind`（`Authorization: Bearer <Agent access token>`，無 body；綁定由 token 解出；已撤銷者回 403）；同裝置重綁時②亦會自動撤銷舊綁定 | `Enroller.Unbind()` 改為先呼叫此端點再清本機憑證；呼叫失敗（離線／401／403）仍照清本機，不阻擋解綁 | ✅ 後端已實作，⬜ Agent 端待接 |
 | 7 | 批次上傳 | `POST /api/agent/digital-usage/batch`（asyncpg 條件式 upsert＋印表機差分/重置邏輯，`sensing_mode='auto'`） | 替換 `internal/uploader` mock URL（`transport.go:101`）為正式端點與 TLS 設定，`Uploader` 邏輯本身不需更動 | ✅ 後端已實作，⬜ Agent 端待接、⬜ 待對真實 Supabase 執行個體跑通驗證 |
 
 **圖例**：✅ 已完成　⬜ 待做
@@ -39,8 +40,14 @@ Response（`consumed`）：`{"status": "consumed", "access_token": str, "refresh
 Request: `{"refresh_token": str}`
 Response: `{"access_token": str, "token_type": "bearer", "expires_in": 3600}`
 
-### ⑤ `POST /api/agent/device-bindings/{device_binding_id}/revoke`（無認證）
-Response: `{"revoked": true|false}`
+### ⑤ `POST /api/agent/device-bindings/{device_binding_id}/revoke`（`Authorization: Bearer <App access token>`，僅限本人）
+Response: `{"revoked": true|false}`（`false` = 已是撤銷狀態）；非本人或不存在回 404
+
+### `GET /api/agent/device-bindings`（`Authorization: Bearer <App access token>`）
+Response: `[{"id", "device_id", "status", "bound_at", "last_seen", "revoked_at"}]`（本人全部綁定，新到舊）
+
+### `POST /api/agent/unbind`（`Authorization: Bearer <Agent access token>`，無 body）
+Response: `{"revoked": true}`；已撤銷回 403、token 無效回 401
 
 ### `GET /api/agent/sensor_config`（無認證）
 Response 範例：
@@ -109,7 +116,7 @@ Response: `{"accepted": <count>}`（200）；裝置遭撤銷時回 401/403（Age
 4. `GET /api/agent/binding-code/{code}/token`（`X-Device-Secret`）→ 步驟3前應為 `pending`，之後應為 `consumed` 並帶出 Agent tokens。
 5. `POST /api/agent/digital-usage/batch`（`Authorization: Bearer <Agent token>`）送一組涵蓋三路徑的 `events`，其中一筆印表機無 `printer_serial`（驗證 fallback）、兩筆印表機序號相同但第二筆 `printer_page_counter` 較小（驗證重置跳過邏輯）→ 應回 200 `{"accepted": N}`；直接查 `digital_usage` 表確認 upsert／勝出規則／`print_pages` 差分正確。
 6. `POST /api/agent/token/refresh` → 確認換發新 Access Token。
-7. `POST /api/agent/device-bindings/{id}/revoke` → 重打步驟5（用舊 token）→ 應回 401/403。
+7. `POST /api/agent/device-bindings/{id}/revoke`（帶步驟2的 App token；另用他人 App token 打一次應回 404）→ 重打步驟5（用舊 token）→ 應回 401/403。另取一組新綁定測 `POST /api/agent/unbind`（帶 Agent token）→ 同樣應使步驟5回 403。
 8. 重複步驟1兩次、同一 `device_uuid` → 確認 `device`／`binding_code` 是 upsert 而非重複建列。
 9. `GET /api/agent/sensor_config` → 確認 11 個欄位＋版本號皆正確。
 
