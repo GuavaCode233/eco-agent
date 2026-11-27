@@ -145,7 +145,7 @@ agent.Run(ctx) 監督者迴圈（另一個 goroutine）
 | U4.8 | AppUserModelID 註冊 | 寫入 `HKCU\Software\Classes\AppUserModelId\EcoSensing.EcoAgent`（`DisplayName`、`IconUri`），讓 toast 顯示 Eco-Agent 名稱與圖示而非 PowerShell；與 U4.4 共用登錄檔程式，不需系統管理員權限。**實作差異**：go-toast 以 AppID 同時作為登錄機碼名稱與顯示名稱，故機碼為 `AppUserModelId\Eco-Agent`（非 `EcoSensing.EcoAgent`）；圖示寫到 `%AppData%\eco-agent
 otification-icon.png` | ✅ |
 | U4.9 | macOS 提醒（降級版） | 正式通知 API 需簽章 `.app` 程式包，暫以 `osascript display notification` 純提示（點擊無法開綁定頁，提示員工點選單列圖示），標 `// TODO(platform)` | ✅ |
-| U4.V | 驗證 | 手動測試，見第 6 節。自動化：工作階段視窗、單一實例、開機自啟（寫暫用機碼）、提醒排程皆有測試。**待手動驗證**：實際登出／關機、睡眠喚醒、toast 外觀與點擊、`-H windowsgui` 建置版 | ⬜ |
+| U4.V | 驗證 | 手動測試，見第 6 節。自動化：工作階段視窗、單一實例、開機自啟（寫暫用機碼）、提醒排程皆有測試。**待手動驗證**：實際登出／關機、睡眠喚醒、toast 外觀與點擊、`-H windowsgui` 建置版。**2026-11-27 手動驗證（依 agent.log）**：單一實例（第二份提示後結束）、開機自啟（登入後由 Run 機碼啟動）、關頁 5 秒內提醒＋冷卻、背景分頁不誤判、啟動時系統匣與狀態頁同時就緒（無誤發提醒）、選單結束（`reason=tray_quit`）、登出與重新開機（`reason=session_end_tray`；Eco-Agent 自身的工作階段視窗隨後也收到 `WM_ENDSESSION`，先記先贏保留了真正起因；重開機登入後由 Run 機碼自動啟動並向正式後端取得綁定碼）、後端不可達時每 30 秒重試皆正常。睡眠喚醒：喚醒後收到 `WM_POWERBROADCAST`（log `resumed from sleep`），剛喚醒時網路未恢復的綁定輪詢失敗後 30 秒自動重試並取得新綁定碼。**尚未驗證**（皆需後端綁定流程可用、佇列有資料）：喚醒後補送實際上傳、已綁定時登出的 `reason=shutdown` 搶送 | 🟡 |
 
 ## 5. 新增依賴
 
