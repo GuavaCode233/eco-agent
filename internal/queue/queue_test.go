@@ -332,3 +332,27 @@ CREATE TABLE events (
 		t.Fatalf("Count after reopen = %d, want 1", n)
 	}
 }
+
+// TestPurgeClearsEventsKeepsState 驗證 Purge 清空待上傳事件、回傳筆數，且不影響 state 表。
+func TestPurgeClearsEventsKeepsState(t *testing.T) {
+	ctx := context.Background()
+	q, _ := openTemp(t)
+	for _, id := range []string{"a", "b"} {
+		if err := q.Enqueue(ctx, sampleEvent(id)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := q.SetState(ctx, "k", "v"); err != nil {
+		t.Fatal(err)
+	}
+	n, err := q.Purge(ctx)
+	if err != nil || n != 2 {
+		t.Fatalf("Purge = %d, %v; want 2", n, err)
+	}
+	if c, _ := q.Count(ctx); c != 0 {
+		t.Fatalf("Count after Purge = %d, want 0", c)
+	}
+	if v, ok, _ := q.GetState(ctx, "k"); !ok || v != "v" {
+		t.Fatalf("state after Purge = %q, %v; want kept", v, ok)
+	}
+}

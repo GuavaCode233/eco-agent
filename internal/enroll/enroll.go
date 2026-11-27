@@ -85,7 +85,14 @@ var (
 	ErrNotBound = errors.New("enroll: device not bound")
 	// ErrRevoked 表示憑證已被撤銷並自清，Agent 應停止上傳、等待重新綁定。
 	ErrRevoked = errors.New("enroll: credentials revoked")
+	// ErrBindingCodeExpired 表示綁定碼已逾時仍未被 App 核銷（員工沒掃）。後端是正常的，
+	// 呼叫端應立即索取新碼，不需等待重試間隔（docs/Eco-Agent_系統匣UI規劃.md §2）。
+	ErrBindingCodeExpired = errors.New("enroll: binding code expired before being scanned")
 )
+
+// BindingCodeHandler 於每次取得新綁定碼時被呼叫，帶入 QR 內容（custom scheme URI）與
+// 到期時間，供 UI（本機綁定頁）顯示。於持有 Enroller 鎖時呼叫，實作不可回呼 Enroller。
+type BindingCodeHandler func(uri string, expiresAt time.Time)
 
 // BindingClient 是 enroll 依賴的 HTTP 介面，供綁定流程（索取 binding_code／輪詢核銷／
 // 換發 Access Token，見 enroll_http.go）呼叫後端；*http.Client 天然滿足此介面。測試可注入
@@ -119,6 +126,9 @@ type Enroller struct {
 
 	revoked bool
 
+	// onBindingCode 為取得新綁定碼時的回呼（WithBindingCodeHandler）；nil 則只記 log。
+	onBindingCode BindingCodeHandler
+
 	// now 供測試注入時間；預設 time.Now。
 	now func() time.Time
 }
@@ -146,6 +156,11 @@ func WithBindingCodeTTL(d time.Duration) Option {
 // WithBindingCodePollInterval 覆寫輪詢核銷 binding_code 的間隔（測試用，縮短以加速）。
 func WithBindingCodePollInterval(d time.Duration) Option {
 	return func(e *Enroller) { e.bindingCodePollInterval = d }
+}
+
+// WithBindingCodeHandler 設定取得新綁定碼時的回呼（見 BindingCodeHandler）。
+func WithBindingCodeHandler(h BindingCodeHandler) Option {
+	return func(e *Enroller) { e.onBindingCode = h }
 }
 
 // WithLogger 設定日誌器（QR URI 等綁定流程訊息輸出至此）。
@@ -377,6 +392,14 @@ func (e *Enroller) ClearCredentials() error {
 	err := e.clearLocked()
 	e.revoked = true // 終止態：與 Unbind 區別，撤銷後不自動重綁。
 	return err
+}
+
+// ResetRevoked 解除 ClearCredentials 設下的撤銷終止態，讓之後的 EnsureBound 重新走綁定
+// 流程。供員工於系統匣按「重新綁定」時呼叫（憑證已在撤銷時清除，此處不再動金鑰庫）。
+func (e *Enroller) ResetRevoked() {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	e.revoked = false
 }
 
 // clearLocked 清除金鑰庫憑證與記憶體 Access Token（不設 revoked 終止態）。

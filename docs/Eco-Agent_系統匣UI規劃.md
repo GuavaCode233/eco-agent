@@ -77,7 +77,7 @@ agent.Run(ctx) 監督者迴圈（另一個 goroutine）
 
 | 階段 | 內容 | 狀態 |
 |------|------|------|
-| U1 | Agent 核心重構（監督者迴圈，不含 UI） | ⬜ |
+| U1 | Agent 核心重構（監督者迴圈，不含 UI） | ✅ |
 | U2 | 本機狀態與綁定網頁 | ⬜ |
 | U3 | 系統匣 | ⬜ |
 | U4 | Windows 平台補齊（關機／喚醒、單一實例、開機自啟、log 檔、無視窗建置、綁定提醒通知） | ⬜ |
@@ -88,13 +88,13 @@ agent.Run(ctx) 監督者迴圈（另一個 goroutine）
 
 | # | 子項 | 說明 | 狀態 |
 |---|------|------|------|
-| U1.1 | `internal/agent` | 實作第 3 節的監督者迴圈、綁定狀態流程與對外介面 | ⬜ |
-| U1.1a | 綁定重試節奏 | 取代 `cmd/eco-agent` 現有 `ensureBoundWithRetry`：綁定碼逾時立即換新碼；後端錯誤才等 30 秒；頁面關閉時取消綁定 ctx 進入閒置 | ⬜ |
-| U1.2 | `internal/enroll` | 新增 `WithBindingCodeHandler(func(uri string, expiresAt time.Time))`，取代只印 log；新增 `ResetRevoked()` 供 `Rebind()` 使用 | ⬜ |
-| U1.3 | `internal/queue` | 新增 `Purge(ctx) (int, error)`，**僅限解綁捨棄殘留資料時使用**（其餘情況仍只在後端回 200 後清除，at-least-once 不變） | ⬜ |
-| U1.4 | `internal/uploader` | 記錄上次上傳的時間、原因與結果，供 `Status()` 使用（`Flush` 已公開，可直接呼叫） | ⬜ |
-| U1.5 | `cmd/eco-agent` | 改用 `agent.Run`；保留 `-headless` 旗標（不開系統匣、log 印主控台，供開發與 demo） | ⬜ |
-| U1.V | 驗證 | 單元測試：解綁三情境（全部送出／有殘留且同意捨棄／有殘留但取消）、撤銷後 `Rebind`、監督者迴圈能重啟子 ctx、綁定碼逾時立即換碼（不等 30 秒）、進入閒置後不再打後端、`StartBinding` 能從閒置恢復；`-headless` 跑法維持持續換碼（無頁面可關） | ⬜ |
+| U1.1 | `internal/agent` | 實作第 3 節的監督者迴圈、綁定狀態流程與對外介面 | ✅ |
+| U1.1a | 綁定重試節奏 | 取代 `cmd/eco-agent` 現有 `ensureBoundWithRetry`：綁定碼逾時立即換新碼；後端錯誤才等 30 秒；頁面關閉時取消綁定 ctx 進入閒置 | ✅ |
+| U1.2 | `internal/enroll` | 新增 `WithBindingCodeHandler(func(uri string, expiresAt time.Time))`，取代只印 log；新增 `ResetRevoked()` 供 `Rebind()` 使用 | ✅ |
+| U1.3 | `internal/queue` | 新增 `Purge(ctx) (int, error)`，**僅限解綁捨棄殘留資料時使用**（其餘情況仍只在後端回 200 後清除，at-least-once 不變） | ✅ |
+| U1.4 | `internal/uploader` | 記錄上次上傳的時間、原因與結果，供 `Status()` 使用（`Flush` 已公開，可直接呼叫） | ✅ |
+| U1.5 | `cmd/eco-agent` | 改用 `agent.Run`；保留 `-headless` 旗標（不開系統匣、log 印主控台，供開發與 demo）。**現況**：系統匣尚未實作，`cmd/eco-agent` 目前一律為 headless；`-headless` 旗標待 U3 加入系統匣時一併新增。CLI `-unbind` 改走「先送再丟」，有殘留時需加 `-force` 才捨棄 | ✅ |
+| U1.V | 驗證 | 單元測試：解綁三情境（全部送出／有殘留且同意捨棄／有殘留但取消）、撤銷後 `Rebind`、監督者迴圈能重啟子 ctx、綁定碼逾時立即換碼（不等 30 秒）、進入閒置後不再打後端、`StartBinding` 能從閒置恢復；`-headless` 跑法維持持續換碼（無頁面可關） | ✅ |
 
 ### U2 — 本機狀態與綁定網頁（`internal/ui/web`）
 

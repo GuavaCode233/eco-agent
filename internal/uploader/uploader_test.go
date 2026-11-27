@@ -340,3 +340,28 @@ func waitFor(t *testing.T, timeout time.Duration, cond func() bool) {
 	}
 	t.Fatal("condition not met within timeout")
 }
+
+// TestLastResultRecorded 驗證 LastResult 記錄最近一次批次結果（供 UI 狀態顯示）。
+func TestLastResultRecorded(t *testing.T) {
+	ctx := context.Background()
+	h := newHarness(t, testCfg())
+	if _, ok := h.up.LastResult(); ok {
+		t.Fatal("LastResult ok before any flush")
+	}
+	enqueueN(t, h.q, queue.PathComputer, 2)
+	if err := h.up.Flush(ctx, ReasonManual); err != nil {
+		t.Fatal(err)
+	}
+	r, ok := h.up.LastResult()
+	if !ok || !r.OK() || r.Sent != 2 || r.Uploaded != 2 || r.Reason != ReasonManual {
+		t.Fatalf("LastResult = %+v, %v; want 2/2 manual OK", r, ok)
+	}
+
+	h.mock.SetStatus(http.StatusInternalServerError)
+	enqueueN(t, h.q, queue.PathComputer, 1)
+	_ = h.up.Flush(ctx, ReasonThreshold)
+	r, _ = h.up.LastResult()
+	if r.OK() || r.Uploaded != 0 || r.Reason != ReasonThreshold {
+		t.Fatalf("LastResult after 500 = %+v; want not OK", r)
+	}
+}

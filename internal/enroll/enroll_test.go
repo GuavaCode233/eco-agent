@@ -239,3 +239,24 @@ func TestDeviceUUIDPersistsAcrossRestartSameQueue(t *testing.T) {
 		t.Fatalf("重啟後 device_uuid 改變：%q → %q", id1, id2)
 	}
 }
+
+func TestResetRevokedAllowsRebind(t *testing.T) {
+	ctx := context.Background()
+	e, _ := newTestEnroller(t)
+	if err := e.EnsureBound(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if err := e.ClearCredentials(); err != nil {
+		t.Fatal(err)
+	}
+	if err := e.EnsureBound(ctx); !errors.Is(err, ErrRevoked) {
+		t.Fatalf("EnsureBound after revoke = %v; want ErrRevoked", err)
+	}
+	e.ResetRevoked()
+	if err := e.EnsureBound(ctx); err != nil {
+		t.Fatalf("EnsureBound after ResetRevoked: %v", err)
+	}
+	if bound, _ := e.IsBound(); !bound {
+		t.Fatal("not bound after ResetRevoked + EnsureBound")
+	}
+}

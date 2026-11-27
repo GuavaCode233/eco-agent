@@ -146,7 +146,7 @@ func (e *Enroller) pollBindingCodeToken(ctx context.Context, code, deviceSecret 
 			return out, nil
 		}
 		if e.now().After(deadline) {
-			return bindingTokenPollResponse{}, fmt.Errorf("binding code polling timed out after %v", e.bindingCodeTTL)
+			return bindingTokenPollResponse{}, fmt.Errorf("%w (polled until %s)", ErrBindingCodeExpired, deadline.Format(time.RFC3339))
 		}
 		select {
 		case <-ctx.Done():
@@ -165,7 +165,8 @@ func (e *Enroller) bindRealLocked(ctx context.Context, deviceUUID string) error 
 		return fmt.Errorf("enroll: request binding code: %w", err)
 	}
 
-	e.log.Info("enroll: scan to bind device", "uri", "ecosensing://bind?code="+bc.Code)
+	uri := "ecosensing://bind?code=" + bc.Code
+	e.log.Info("enroll: scan to bind device", "uri", uri)
 
 	var expiresAt time.Time
 	if bc.ExpiresAt != "" {
@@ -175,6 +176,14 @@ func (e *Enroller) bindRealLocked(ctx context.Context, deviceUUID string) error 
 			e.log.Warn("enroll: could not parse binding code expires_at, falling back to bindingCodeTTL",
 				"expires_at", bc.ExpiresAt, "err", perr)
 		}
+	}
+	if e.onBindingCode != nil {
+		// 與 pollBindingCodeToken 的輪詢截止時間一致：取 bindingCodeTTL 與伺服器 expires_at 較早者。
+		shown := e.now().Add(e.bindingCodeTTL)
+		if !expiresAt.IsZero() && expiresAt.Before(shown) {
+			shown = expiresAt
+		}
+		e.onBindingCode(uri, shown)
 	}
 
 	tok, err := e.pollBindingCodeToken(ctx, bc.Code, bc.DeviceSecret, expiresAt)

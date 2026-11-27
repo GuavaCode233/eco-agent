@@ -142,8 +142,20 @@ func TestBindRealFlowTimesOutWhenAlwaysPending(t *testing.T) {
 
 	e, kc := newRealFlowEnroller(t, srv, WithBindingCodeTTL(30*time.Millisecond), WithBindingCodePollInterval(5*time.Millisecond))
 
-	if err := e.EnsureBound(ctx); err == nil {
-		t.Fatal("EnsureBound = nil, want timeout error")
+	var gotURI string
+	var gotExp time.Time
+	e.onBindingCode = func(uri string, exp time.Time) { gotURI, gotExp = uri, exp }
+
+	before := time.Now()
+	if err := e.EnsureBound(ctx); !errors.Is(err, ErrBindingCodeExpired) {
+		t.Fatalf("EnsureBound = %v, want ErrBindingCodeExpired", err)
+	}
+	if gotURI != "ecosensing://bind?code=NEVER" {
+		t.Fatalf("binding code handler uri = %q", gotURI)
+	}
+	// 顯示的到期時間取 bindingCodeTTL（30ms）與伺服器 expires_at（1 分鐘）較早者。
+	if gotExp.Before(before) || gotExp.After(before.Add(time.Second)) {
+		t.Fatalf("binding code handler expiresAt = %v, want ~now+30ms", gotExp)
 	}
 	if bound, _ := e.IsBound(); bound {
 		t.Fatal("IsBound = true after timed-out bind, want false")

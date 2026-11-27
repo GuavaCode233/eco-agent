@@ -1,9 +1,12 @@
 // Command eco-agent 是 Eco-Agent 的正式進入點（無人值守背景常駐程式）。
 //
-// 職責：載入配置（含 §後端串接 sensor_config 真串）、開啟本機持久化佇列、完成裝置綁定
-// （真實五端點流程或 mock，依是否設定後端 base URL 分派，見 internal/enroll）、啟動三條
-// 感測路徑（各自獨立 goroutine，任一路徑不可用僅降級跳過，不使 Agent 崩潰）、啟動 uploader
-// 的四重觸發批次上傳迴圈，直到收到中斷訊號（相當於關機/登出前 hook）為止。
+// 職責：載入配置（含 §後端串接 sensor_config 真串）、開啟本機持久化佇列、建立 enroll／
+// uploader，交由 internal/agent 的監督者迴圈執行：綁定（失敗持續重試）→ 啟動三條感測路徑
+// 與四重觸發上傳 → 遇解綁／撤銷／Refresh Token 失效回到綁定，直到收到中斷訊號（相當於
+// 關機/登出前 hook，uploader 搶送零頭）為止。
+//
+// 目前為 headless 模式（尚無系統匣，見 docs/Eco-Agent_系統匣UI規劃.md U3）：沒有綁定頁可
+// 關閉，因此綁定階段維持持續換碼，QR 內容（custom scheme URI）印在 log。
 //
 // 各 demo（cmd/*-demo）用假資料、mock sampler、暫存佇列目錄驗證單一環節；本進入點串起
 // 整個生產路徑：真實感測來源（有則真、無則優雅降級）、持久化佇列落地於使用者設定目錄、
@@ -11,13 +14,13 @@
 //
 // 執行：go run ./cmd/eco-agent
 //
-// 員工端主動解綁（換機，進度表 6.1）：go run ./cmd/eco-agent -unbind
-// ——呼叫後端 POST /api/agent/unbind（失敗不阻擋）並清除本機憑證後結束。
+// 員工端主動解綁（換機，進度表 6.1）：go run ./cmd/eco-agent -unbind [-force]
+// ——採「先送再丟」：先上傳一次佇列；仍有送不出去的資料時，未加 -force 即中止並告知筆數，
+// 加 -force 則捨棄後解綁。解綁會呼叫後端 POST /api/agent/unbind（失敗不阻擋）並清除本機憑證。
 //
 // 環境變數（詳見 .env.example）：
 //   - ECO_AGENT_PROFILE=testing 可切換為測試參數（數分鐘內觀察完整流程），預設正式值。
-//   - ECO_AGENT_API_BASE_URL 覆寫後端 base URL；留空則依 profile 預設值，且裝置綁定/上傳
-//     走 mock 捷徑（後端尚未就緒時仍可完整跑通佇列與四重觸發）。
+//   - ECO_AGENT_API_BASE_URL 覆寫後端 base URL；留空則依 profile 預設值。
 //   - ECO_AGENT_QUEUE_PATH 覆寫佇列 SQLite 檔案路徑；未設時預設落於使用者設定目錄下
 //     eco-agent/queue.db（Windows: %AppData%、macOS: ~/Library/Application Support）。
 //   - GOOGLE_OAUTH_CLIENT_ID/SECRET、ECO_AGENT_PRINTER_HOST 等見 .env.example；未設定時
@@ -36,26 +39,20 @@ import (
 	"syscall"
 	"time"
 
+	"eco-agent/internal/agent"
 	"eco-agent/internal/config"
 	"eco-agent/internal/enroll"
 	"eco-agent/internal/platform"
 	"eco-agent/internal/queue"
-	"eco-agent/internal/sensors/computer"
-	"eco-agent/internal/sensors/drive"
-	"eco-agent/internal/sensors/printer"
 	"eco-agent/internal/uploader"
 )
 
 // EnvQueuePath 覆寫佇列 SQLite 檔案路徑。
 const EnvQueuePath = "ECO_AGENT_QUEUE_PATH"
 
-// bindRetryInterval 是綁定失敗（後端不可達、員工未於 bindingCodeTTL 內掃碼）後重新索取
-// 綁定碼前的等待時間。綁定是開機必經步驟，失敗不應讓 Agent 退出，而是持續重試直到成功
-// 或收到關機訊號。
-const bindRetryInterval = 30 * time.Second
-
 func main() {
-	unbind := flag.Bool("unbind", false, "員工端主動解綁：通知後端並清除本機憑證後結束")
+	unbind := flag.Bool("unbind", false, "員工端主動解綁：先上傳佇列，再通知後端並清除本機憑證後結束")
+	force := flag.Bool("force", false, "搭配 -unbind：佇列仍有送不出去的資料時直接捨棄")
 	flag.Parse()
 
 	log := slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelInfo}))
@@ -86,68 +83,46 @@ func main() {
 	defer q.Close()
 	log.Info("queue opened", "path", dbPath)
 
+	// ag 於 enroll 之後建立；綁定碼回呼只在 ag.Run 期間觸發，此時 ag 已賦值。
+	var ag *agent.Agent
 	enr := enroll.New(platform.NewOSKeychain(), q,
 		enroll.WithBaseURL(cfg.BaseURL),
 		enroll.WithBindingCodeTTL(cfg.BindingCodeTTL),
 		enroll.WithLogger(log),
+		enroll.WithBindingCodeHandler(func(uri string, exp time.Time) { ag.OnBindingCode(uri, exp) }),
 	)
+	newUploader := func() agent.Uploader { return uploader.New(q, enr, cfg, uploader.WithLogger(log)) }
+	ag = agent.New(enr, q, newUploader, agent.DefaultSensors(q, enr, cfg, log), agent.WithLogger(log))
+
 	if *unbind {
-		if err := enr.Unbind(ctx); err != nil {
-			fatal(log, "Unbind", err)
-		}
-		log.Info("device unbound, local credentials cleared")
+		runUnbind(ctx, ag, *force, log)
 		return
 	}
 
-	if err := ensureBoundWithRetry(ctx, enr, log); err != nil {
-		if errors.Is(err, context.Canceled) {
-			log.Info("eco-agent stopped before binding completed (shutdown signal)")
-			return
-		}
-		fatal(log, "EnsureBound", err)
-	}
-	log.Info("device bound")
-
-	up := uploader.New(q, enr, cfg, uploader.WithLogger(log))
-
-	startComputerSensor(ctx, q, enr, cfg, log)
-	startDriveSensor(ctx, q, enr, cfg, log)
-	startPrinterSensor(ctx, q, enr, cfg, log)
-
 	log.Info("eco-agent started")
-	err = up.Run(ctx)
-	switch {
-	case errors.Is(err, context.Canceled), errors.Is(err, context.DeadlineExceeded):
-		log.Info("eco-agent stopped (shutdown signal)")
-	case errors.Is(err, uploader.ErrStopped):
-		log.Warn("eco-agent stopped (credentials revoked)")
-	default:
+	if err := ag.Run(ctx); err != nil && !errors.Is(err, context.Canceled) {
 		log.Warn("eco-agent stopped", "err", err)
+		return
 	}
+	log.Info("eco-agent stopped (shutdown signal)")
 }
 
-// ensureBoundWithRetry 反覆呼叫 EnsureBound 直到綁定成功。暫時性失敗（後端不可達、綁定碼
-// 逾時未掃）等待 bindRetryInterval 後重試（每次重新索取綁定碼）；ErrRevoked 屬終止態、
-// ctx 取消代表關機，兩者直接回傳。
-func ensureBoundWithRetry(ctx context.Context, enr *enroll.Enroller, log *slog.Logger) error {
-	for {
-		err := enr.EnsureBound(ctx)
-		if err == nil {
-			return nil
+// runUnbind 執行 CLI 解綁（先送再丟）；佇列有殘留且未加 -force 時中止。
+func runUnbind(ctx context.Context, ag *agent.Agent, force bool, log *slog.Logger) {
+	err := ag.Unbind(ctx, func(leftover int) bool {
+		if !force {
+			log.Warn("unbind aborted: queued events could not be uploaded; rerun with -force to discard them",
+				"leftover", leftover)
 		}
-		if errors.Is(err, enroll.ErrRevoked) {
-			return err
-		}
-		if ctx.Err() != nil {
-			return ctx.Err()
-		}
-		log.Warn("binding failed, will retry", "err", err, "retry_in", bindRetryInterval)
-		select {
-		case <-ctx.Done():
-			return ctx.Err()
-		case <-time.After(bindRetryInterval):
-		}
+		return force
+	})
+	switch {
+	case errors.Is(err, agent.ErrUnbindCancelled):
+		os.Exit(2)
+	case err != nil:
+		fatal(log, "Unbind", err)
 	}
+	log.Info("device unbound, local credentials cleared")
 }
 
 // queuePath 回傳佇列 SQLite 檔案路徑：ECO_AGENT_QUEUE_PATH 覆寫，否則預設落於使用者
@@ -165,64 +140,6 @@ func queuePath() (string, error) {
 		return "", fmt.Errorf("mkdir %q: %w", filepath.Dir(path), err)
 	}
 	return path, nil
-}
-
-// startComputerSensor 啟動路徑 A；平台不支援活動偵測則記 log 並跳過（不影響其餘路徑）。
-func startComputerSensor(ctx context.Context, q *queue.Queue, enr *enroll.Enroller, cfg config.Config, log *slog.Logger) {
-	detector := platform.NewActivityDetector()
-	if err := detector.Available(); err != nil {
-		log.Warn("path A (computer) skipped", "err", err)
-		return
-	}
-	s := computer.New(q, enr, detector, platform.NewCPUSampler(), cfg.ComputerUsageRecordInterval,
-		computer.WithLogger(log))
-	go func() {
-		if err := s.Run(ctx); err != nil && !errors.Is(err, context.Canceled) {
-			log.Warn("path A (computer) exited", "err", err)
-		}
-	}()
-	log.Info("path A (computer) started", "interval", cfg.ComputerUsageRecordInterval)
-}
-
-// startDriveSensor 啟動路徑 C；Google OAuth 憑證未設定或尚未完成首次授權則優雅降級跳過
-// （CLAUDE.md §6：不使整個 Agent 崩潰），其餘路徑照常運作。
-func startDriveSensor(ctx context.Context, q *queue.Queue, enr *enroll.Enroller, cfg config.Config, log *slog.Logger) {
-	hc, err := drive.NewClient(ctx)
-	if err != nil {
-		if errors.Is(err, drive.ErrCredentialsNotConfigured) || errors.Is(err, drive.ErrNotAuthorized) {
-			log.Warn("path C (drive) skipped", "err", err)
-		} else {
-			log.Warn("path C (drive) skipped (client init failed)", "err", err)
-		}
-		return
-	}
-	s := drive.NewSensor(q, enr, drive.NewAPIClient(hc), cfg.CheckInterval, cfg.DriveQuotaInterval,
-		drive.WithSensorLogger(log))
-	go func() {
-		if err := s.Run(ctx); err != nil && !errors.Is(err, context.Canceled) {
-			log.Warn("path C (drive) exited", "err", err)
-		}
-	}()
-	log.Info("path C (drive) started", "interval", cfg.DriveQuotaInterval)
-}
-
-// startPrinterSensor 啟動路徑 B；未設定 ECO_AGENT_PRINTER_HOST（本機無個人專屬印表機）
-// 或連不到目標則記 log 並跳過（CLAUDE.md 3.4 BYOD 摩擦點），不使 Agent 卡住。
-func startPrinterSensor(ctx context.Context, q *queue.Queue, enr *enroll.Enroller, cfg config.Config, log *slog.Logger) {
-	client, err := printer.NewSNMPClientFromEnv()
-	if err != nil {
-		log.Warn("path B (printer) skipped", "err", err)
-		return
-	}
-	s := printer.NewSensor(q, enr, client, cfg.CheckInterval, cfg.PrinterPollInterval,
-		printer.WithSensorLogger(log))
-	go func() {
-		if err := s.Run(ctx); err != nil && !errors.Is(err, context.Canceled) {
-			log.Warn("path B (printer) exited", "err", err)
-		}
-	}()
-	addr, oid := client.Target()
-	log.Info("path B (printer) started", "target", addr, "oid", oid, "interval", cfg.PrinterPollInterval)
 }
 
 func fatal(log *slog.Logger, msg string, err error) {

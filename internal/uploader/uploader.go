@@ -76,6 +76,33 @@ type Uploader struct {
 
 	mu      sync.Mutex
 	stopped bool
+	last    Result
+	hasLast bool
+}
+
+// Result 是最近一次送出批次的結果，供 UI 狀態顯示（docs/Eco-Agent_系統匣UI規劃.md U1.4）。
+type Result struct {
+	At       time.Time // 送出完成時間
+	Reason   Reason    // 觸發來源
+	Sent     int       // 本批筆數
+	Uploaded int       // 後端回 200 而清除的筆數
+	Revoked  bool      // 是否偵測到撤銷（401/403）
+}
+
+// OK 回報本批是否全數送達。
+func (r Result) OK() bool { return !r.Revoked && r.Uploaded == r.Sent }
+
+// LastResult 回傳最近一次送出批次的結果；尚未送過任何批次時 ok 為 false。
+func (u *Uploader) LastResult() (r Result, ok bool) {
+	u.mu.Lock()
+	defer u.mu.Unlock()
+	return u.last, u.hasLast
+}
+
+func (u *Uploader) recordResult(r Result) {
+	u.mu.Lock()
+	u.last, u.hasLast = r, true
+	u.mu.Unlock()
 }
 
 // Option 客製化 Uploader。
@@ -233,6 +260,7 @@ func (u *Uploader) Flush(ctx context.Context, reason Reason) error {
 		}
 
 		uploaded, revoked := u.sendBatch(ctx, idToken, accessToken, batch)
+		u.recordResult(Result{At: time.Now(), Reason: reason, Sent: len(batch), Uploaded: len(uploaded), Revoked: revoked})
 		if len(uploaded) > 0 {
 			// At-least-once：只有回 200 的事件才在此清除。
 			if err := u.q.MarkUploaded(ctx, uploaded); err != nil {
