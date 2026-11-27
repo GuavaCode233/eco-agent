@@ -81,9 +81,13 @@ type Status struct {
 	State            State
 	BindingURI       string    // 綁定中時的 QR 內容；其他狀態為空
 	BindingExpiresAt time.Time // BindingURI 的到期時間
-	QueueCount       int
-	LastUpload       *uploader.Result // 本次綁定期間最近一次上傳結果；尚無則為 nil
-	Paths            map[queue.PathType]bool
+	// BindingError／BindingRetryAt：綁定中遇後端錯誤（連不上、非 200）時的最近一次錯誤與下次
+	// 重試時間，供頁面顯示「無法連線，N 秒後重試」。取得新綁定碼、綁定成功或暫停時清除。
+	BindingError   error
+	BindingRetryAt time.Time
+	QueueCount     int
+	LastUpload     *uploader.Result // 本次綁定期間最近一次上傳結果；尚無則為 nil
+	Paths          map[queue.PathType]bool
 	// DiscardedOnRevoke 為最近一次撤銷時捨棄的佇列筆數（供 UI 告知員工）；Rebind 後歸零。
 	DiscardedOnRevoke int
 }
@@ -104,6 +108,8 @@ type Agent struct {
 	state         State
 	bindingURI    string
 	bindingExp    time.Time
+	bindErr       error
+	bindRetryAt   time.Time
 	cancelAttempt context.CancelFunc // 綁定中：取消進行中的 EnsureBound
 	sess          *session           // 已綁定：目前的子 session
 	discarded     int                // 最近一次撤銷時捨棄的佇列筆數
@@ -164,6 +170,7 @@ func (a *Agent) OnBindingCode(uri string, expiresAt time.Time) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	a.bindingURI, a.bindingExp = uri, expiresAt
+	a.bindErr, a.bindRetryAt = nil, time.Time{}
 }
 
 // Run 執行監督者迴圈，直到 ctx 取消（關機）為止，回傳 ctx.Err()。
@@ -233,6 +240,12 @@ func (a *Agent) bindPhase(ctx context.Context) error {
 			a.log.Info("agent: binding code expired, requesting a new one")
 		default:
 			a.log.Warn("agent: binding failed, will retry", "err", err, "retry_in", a.retryInterval)
+			a.mu.Lock()
+			if a.state == StateBinding {
+				a.bindingURI, a.bindingExp = "", time.Time{} // 舊碼已無法輪詢，不再顯示
+				a.bindErr, a.bindRetryAt = err, time.Now().Add(a.retryInterval)
+			}
+			a.mu.Unlock()
 			if err := a.waitWake(ctx, a.retryInterval); err != nil {
 				return err
 			}
@@ -249,6 +262,7 @@ func (a *Agent) boundPhase(parent context.Context) (revoked bool) {
 	a.mu.Lock()
 	a.state = StateBound
 	a.bindingURI, a.bindingExp = "", time.Time{}
+	a.bindErr, a.bindRetryAt = nil, time.Time{}
 	a.sess = s
 	a.lastUp = s.up
 	a.mu.Unlock()
@@ -401,6 +415,7 @@ func (a *Agent) PauseBinding() bool {
 	}
 	a.state = StateIdle
 	a.bindingURI, a.bindingExp = "", time.Time{}
+	a.bindErr, a.bindRetryAt = nil, time.Time{}
 	if a.cancelAttempt != nil {
 		a.cancelAttempt()
 	}
@@ -540,6 +555,8 @@ func (a *Agent) Status(ctx context.Context) Status {
 		State:             a.state,
 		BindingURI:        a.bindingURI,
 		BindingExpiresAt:  a.bindingExp,
+		BindingError:      a.bindErr,
+		BindingRetryAt:    a.bindRetryAt,
 		DiscardedOnRevoke: a.discarded,
 	}
 	sess := a.sess

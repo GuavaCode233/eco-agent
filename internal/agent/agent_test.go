@@ -233,12 +233,20 @@ func TestBackendErrorWaitsRetryInterval(t *testing.T) {
 	})
 	h.run(t)
 	eventually(t, "first attempt", func() bool { return atomic.LoadInt32(&h.b.attempts) == 1 })
+	// 頁面需要的回饋：最近一次錯誤與下次重試時間（約 1 小時後）。
+	eventually(t, "binding error exposed", func() bool {
+		st := h.a.Status(context.Background())
+		return st.BindingError != nil && time.Until(st.BindingRetryAt) > 59*time.Minute
+	})
 	time.Sleep(50 * time.Millisecond)
 	if n := atomic.LoadInt32(&h.b.attempts); n != 1 {
 		t.Fatalf("attempts during retry wait = %d, want 1", n)
 	}
 	h.a.StartBinding()
 	h.waitState(t, StateBound)
+	if st := h.a.Status(context.Background()); st.BindingError != nil || !st.BindingRetryAt.IsZero() {
+		t.Fatalf("binding error not cleared after bound: %+v", st)
+	}
 }
 
 // PauseBinding（綁定頁關閉）應取消進行中的綁定並停止打後端；StartBinding 恢復。

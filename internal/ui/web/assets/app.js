@@ -3,7 +3,7 @@
 "use strict";
 
 const POLL_MS = 2000;
-const views = ["loading", "binding", "idle", "bound", "revoked", "offline"];
+const views = ["loading", "binding", "idle", "retry", "bound", "revoked", "offline"];
 const pathNames = { computer: "電腦使用", drive: "雲端儲存", printer: "印表機" };
 const reasonNames = {
   threshold: "累積達量",
@@ -15,6 +15,7 @@ const reasonNames = {
 
 let qrVersion = "";
 let expiresAt = null;
+let retryAt = null;
 
 function show(name) {
   for (const v of views) {
@@ -55,8 +56,17 @@ function renderBound(s) {
 
 function renderBinding(s) {
   const b = s.binding;
+  if (!b && s.binding_retry) {
+    // 後端連不上或回錯誤：顯示原因與下次重試倒數。
+    document.getElementById("retry-message").textContent = s.binding_retry.message;
+    retryAt = new Date(s.binding_retry.at);
+    tick();
+    show("retry");
+    return;
+  }
+  retryAt = null;
   if (!b) {
-    show("idle"); // 綁定碼尚未取得（剛恢復或後端暫時連不上）
+    show("idle"); // 正在向伺服器索取綁定碼
     return;
   }
   if (b.version !== qrVersion) {
@@ -69,6 +79,13 @@ function renderBinding(s) {
 }
 
 function tick() {
+  const r = document.getElementById("retry-countdown");
+  if (retryAt) {
+    const left = Math.max(0, Math.round((retryAt - Date.now()) / 1000));
+    r.textContent = left > 0 ? left + " 秒後自動重試" : "重試中…";
+  } else {
+    r.textContent = "";
+  }
   const el = document.getElementById("countdown");
   if (!expiresAt) {
     el.textContent = "";
@@ -81,7 +98,10 @@ function tick() {
 }
 
 function render(s) {
-  if (s.state !== "binding") expiresAt = null;
+  if (s.state !== "binding") {
+    expiresAt = null;
+    retryAt = null;
+  }
   switch (s.state) {
     case "binding":
       renderBinding(s);
@@ -113,6 +133,18 @@ async function poll() {
     show("offline");
   }
 }
+
+document.getElementById("retry-now").addEventListener("click", async (ev) => {
+  const btn = ev.currentTarget;
+  btn.disabled = true;
+  try {
+    await fetch("retry", { method: "POST", cache: "no-store" });
+  } catch (_) {
+    // 連不上 Agent 時由下一次 poll 顯示離線畫面。
+  }
+  await poll();
+  btn.disabled = false;
+});
 
 poll();
 setInterval(poll, POLL_MS);

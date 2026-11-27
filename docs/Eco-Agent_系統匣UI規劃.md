@@ -104,7 +104,7 @@ agent.Run(ctx) 監督者迴圈（另一個 goroutine）
 | U2.1 | 本機 HTTP server | 只監聽 `127.0.0.1:0`（隨機埠），網址路徑帶隨機 token（`/<token>/`），其他程式猜不到網址；錯誤 token 回 404 | ✅ |
 | U2.2 | 頁面 | `embed` 打包的 HTML；JS 每 2 秒拉 `/<token>/status.json` | ✅ |
 | U2.3 | QR | `/<token>/qr.png` 以 `skip2/go-qrcode` 即時產生，附到期倒數；綁定碼重抓時自動換新 | ✅ |
-| U2.4 | 狀態呈現 | 綁定中 → QR；已綁定 → 佇列筆數、上次上傳時間、三路徑狀態；已撤銷 → 提示（含撤銷時捨棄的筆數 `DiscardedOnRevoke`）並引導至系統匣「重新綁定」 | ✅ |
+| U2.4 | 狀態呈現 | 綁定中 → QR；已綁定 → 佇列筆數、上次上傳時間、三路徑狀態；已撤銷 → 提示（含撤銷時捨棄的筆數 `DiscardedOnRevoke`）並引導至系統匣「重新綁定」；綁定遇後端錯誤 → 顯示原因（「無法連線到伺服器」／「伺服器暫時無法處理」，不顯示原始錯誤）、下次自動重試倒數與「立即重試」按鈕（`POST /<token>/retry` → `StartBinding()`） | ✅ |
 | U2.5 | 安全 | 頁面只露出綁定碼（5 分鐘過期、需 App 登入才能核銷）；`device_secret` 與所有 token 一律不輸出；回應加 `Cache-Control: no-store` | ✅ |
 | U2.6 | 頁面心跳 | 以頁面每 2 秒拉 `status.json` 作為心跳；約 15 秒未收到即判定頁面關閉 → 通知 agent 進入閒置。頁面（重新）開啟時呼叫 `StartBinding()` 恢復換碼 | ✅ |
 | U2.V | 驗證 | 測試：status JSON 內容、錯誤 token 回 404、回應中不含 `device_secret`／token、心跳逾時觸發閒置、重新開頁恢復綁定。另有整合測試（真實 agent／enroll 對假後端）：關頁 → 閒置且不再索取綁定碼 → 重新開頁恢復 → 掃碼後頁面顯示已綁定。**現況**：系統匣完成前，以 `eco-agent -web` 啟動網頁並開啟瀏覽器（暫時旗標，U3 移除）；已加 Host header 檢查擋 DNS rebinding，status.json 只給綁定碼指紋、不輸出綁定碼本身 | ✅ |

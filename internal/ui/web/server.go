@@ -27,6 +27,7 @@ import (
 	"log/slog"
 	"net"
 	"net/http"
+	"net/url"
 	"sort"
 	"sync"
 	"time"
@@ -199,6 +200,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /{token}/app.js", s.withToken(s.handleAppJS))
 	mux.HandleFunc("GET /{token}/status.json", s.withToken(s.handleStatus))
 	mux.HandleFunc("GET /{token}/qr.png", s.withToken(s.handleQR))
+	mux.HandleFunc("POST /{token}/retry", s.withToken(s.handleRetry))
 	return s.secure(mux)
 }
 
@@ -245,6 +247,7 @@ func (s *Server) handleAppJS(w http.ResponseWriter, r *http.Request) {
 type statusJSON struct {
 	State             string          `json:"state"`
 	BindingCode       *bindingJSON    `json:"binding,omitempty"`
+	BindingRetry      *retryJSON      `json:"binding_retry,omitempty"`
 	QueueCount        int             `json:"queue_count"`
 	LastUpload        *lastUploadJSON `json:"last_upload,omitempty"`
 	Paths             []pathJSON      `json:"paths,omitempty"`
@@ -255,6 +258,13 @@ type bindingJSON struct {
 	// Version 隨綁定碼改變，供頁面替 qr.png 加上 cache-busting 參數。
 	Version   string    `json:"version"`
 	ExpiresAt time.Time `json:"expires_at"`
+}
+
+// retryJSON 描述綁定遇後端錯誤後的等待重試狀態。Message 為給員工看的固定文字，
+// 不直接輸出原始錯誤（避免把內部網址等細節顯示在頁面上；原始錯誤仍在 log）。
+type retryJSON struct {
+	At      time.Time `json:"at"`
+	Message string    `json:"message"`
 }
 
 type lastUploadJSON struct {
@@ -282,6 +292,9 @@ func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 	if st.BindingURI != "" {
 		out.BindingCode = &bindingJSON{Version: qrVersion(st.BindingURI), ExpiresAt: st.BindingExpiresAt}
 	}
+	if st.BindingError != nil {
+		out.BindingRetry = &retryJSON{At: st.BindingRetryAt, Message: bindingErrorMessage(st.BindingError)}
+	}
 	if r := st.LastUpload; r != nil {
 		out.LastUpload = &lastUploadJSON{At: r.At, Reason: string(r.Reason), Sent: r.Sent, Uploaded: r.Uploaded, OK: r.OK(), Revoked: r.Revoked}
 	}
@@ -292,6 +305,23 @@ func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(out)
+}
+
+// handleRetry 供頁面「立即重試」按鈕：喚醒等待中的綁定重試（agent.StartBinding）。
+// 只能由知道 token 的本機頁面呼叫（路徑 token + Host 檢查），且動作本身無副作用風險。
+func (s *Server) handleRetry(w http.ResponseWriter, r *http.Request) {
+	s.heartbeat()
+	s.ag.StartBinding()
+	w.WriteHeader(http.StatusNoContent)
+}
+
+// bindingErrorMessage 把綁定錯誤轉成給員工看的文字：連不上伺服器與伺服器回錯誤分開說明。
+func bindingErrorMessage(err error) string {
+	var ue *url.Error
+	if errors.As(err, &ue) {
+		return "無法連線到 Eco-Sensing 伺服器，請確認網路連線。"
+	}
+	return "Eco-Sensing 伺服器暫時無法處理綁定請求。"
 }
 
 // handleQR 以目前綁定碼即時產生 QR PNG；非綁定中（無綁定碼）回 404。

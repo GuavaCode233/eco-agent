@@ -4,9 +4,12 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
+	"fmt"
 	"io"
 	"log/slog"
 	"net/http"
+	"net/url"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -251,5 +254,49 @@ func TestPageClosedWhileBoundNoReminder(t *testing.T) {
 	time.Sleep(20 * time.Millisecond)
 	if n := atomic.LoadInt32(&closedCalls); n != 0 {
 		t.Fatalf("onPageClosed calls while bound = %d, want 0", n)
+	}
+}
+
+// 綁定遇後端錯誤：status.json 給固定說明文字與重試時間（不輸出原始錯誤）；POST retry 喚醒重試。
+func TestBindingRetryFeedbackAndRetryNow(t *testing.T) {
+	retryAt := time.Now().Add(30 * time.Second).UTC().Truncate(time.Second)
+	netErr := fmt.Errorf("enroll: request binding code: send request: %w",
+		&url.Error{Op: "Post", URL: "http://internal.example/api/agent/binding-code", Err: errors.New("connection refused")})
+	ag := &fakeAgent{st: agent.Status{State: agent.StateBinding, BindingError: netErr, BindingRetryAt: retryAt}}
+	s := startServer(t, ag)
+
+	_, body := get(t, s.URL()+"status.json")
+	if bytes.Contains(body, []byte("internal.example")) || bytes.Contains(body, []byte("refused")) {
+		t.Fatalf("status.json leaks raw error: %s", body)
+	}
+	var got statusJSON
+	if err := json.Unmarshal(body, &got); err != nil {
+		t.Fatal(err)
+	}
+	if got.BindingRetry == nil || !got.BindingRetry.At.Equal(retryAt) || !strings.Contains(got.BindingRetry.Message, "無法連線") {
+		t.Fatalf("binding_retry = %+v, want network message and retry time", got.BindingRetry)
+	}
+
+	ag.set(agent.Status{State: agent.StateBinding, BindingError: errors.New("binding-code request returned status 503"), BindingRetryAt: retryAt})
+	_, body = get(t, s.URL()+"status.json")
+	_ = json.Unmarshal(body, &got)
+	if !strings.Contains(got.BindingRetry.Message, "暫時無法處理") {
+		t.Fatalf("server-error message = %q", got.BindingRetry.Message)
+	}
+
+	before := atomic.LoadInt32(&ag.starts)
+	res, err := http.Post(s.URL()+"retry", "", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	res.Body.Close()
+	if res.StatusCode != http.StatusNoContent || atomic.LoadInt32(&ag.starts) != before+1 {
+		t.Fatalf("POST retry = %d, starts %d→%d; want 204 and one StartBinding", res.StatusCode, before, ag.starts)
+	}
+	if res, _ := get(t, s.URL()+"retry"); res.StatusCode == http.StatusNoContent {
+		t.Fatal("GET retry should not trigger a retry")
+	}
+	if res, _ := http.Post(strings.Replace(s.URL(), s.token, "wrong", 1)+"retry", "", nil); res.StatusCode != http.StatusNotFound {
+		t.Fatalf("POST retry with wrong token = %d, want 404", res.StatusCode)
 	}
 }

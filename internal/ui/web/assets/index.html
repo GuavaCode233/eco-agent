@@ -70,6 +70,18 @@
   dd { margin: 0; text-align: right; font-variant-numeric: tabular-nums; }
   .off { color: var(--muted); }
   .note { margin-top: 16px; padding: 10px 12px; border-radius: 8px; border: 1px solid var(--line); }
+  button {
+    font: inherit;
+    margin-top: 8px;
+    padding: 8px 16px;
+    border-radius: 8px;
+    border: 1px solid var(--accent);
+    background: transparent;
+    color: var(--accent);
+    cursor: pointer;
+  }
+  button:disabled { opacity: 0.5; cursor: default; }
+  .dot.retry { background: var(--warn); }
   [hidden] { display: none !important; }
 </style>
 </head>
@@ -93,7 +105,14 @@
 
   <section id="view-idle" hidden>
     <h2>尚未綁定</h2>
-    <p>正在重新產生綁定用的 QR Code…</p>
+    <p>正在產生綁定用的 QR Code…</p>
+  </section>
+
+  <section id="view-retry" hidden>
+    <h2>暫時無法取得綁定 QR Code</h2>
+    <p id="retry-message"></p>
+    <p id="retry-countdown" class="countdown"></p>
+    <button id="retry-now" type="button">立即重試</button>
   </section>
 
   <section id="view-bound" hidden>
