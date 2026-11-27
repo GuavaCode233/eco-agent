@@ -74,6 +74,7 @@ eco-agent/
 | Step 1 | 路徑 A：電腦使用（狀態值輪詢，短區間，active/idle 兩態，使用率加權、後端計算） | HTTPS（mock 送出） | 固定區間輪詢 | ✅ |
 | Step 2 | 路徑 C：雲端儲存（狀態值輪詢，長區間，真串 Google Drive） | HTTPS（mock 送出） | 持久化時間戳到期判斷 | ✅ |
 | Step 3 | 路徑 B：印表機（僅個人專屬機 SNMP 輪詢歸戶） | HTTPS（mock 送出） | 持久化時間戳到期判斷 | ✅ |
+| Step 4 | 系統匣 UI：監督者迴圈、本機綁定 QR 網頁、系統匣、Windows 平台補齊（U1–U4，子項與狀態見 `docs/Eco-Agent_系統匣UI規劃.md`） | — | — | ⬜ |
 
 ### Step 0 — 地基（佇列 + 配置 + 上傳骨架）
 
