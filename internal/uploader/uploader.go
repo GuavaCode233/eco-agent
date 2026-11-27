@@ -91,7 +91,7 @@ func WithSender(s Sender) Option {
 
 // WithUploadURL 讓 Sender 指向指定 mock URL（測試指向 httptest）。
 func WithUploadURL(url string) Option {
-	return func(u *Uploader) { u.sender = NewMockHTTPSender(url) }
+	return func(u *Uploader) { u.sender = NewHTTPSender(url) }
 }
 
 // WithShutdownTimeout 設定關機搶送的逾時。
@@ -114,7 +114,7 @@ func New(q Queue, creds Credentials, cfg config.Config, opts ...Option) *Uploade
 		q:               q,
 		creds:           creds,
 		cfg:             cfg,
-		sender:          NewMockHTTPSender(url),
+		sender:          NewHTTPSender(url),
 		log:             slog.Default(),
 		shutdownTimeout: 5 * time.Second,
 	}
@@ -280,6 +280,12 @@ func (u *Uploader) sendBatch(ctx context.Context, idToken, accessToken string, b
 	}
 	switch resp.StatusCode {
 	case http.StatusOK:
+		if resp.Accepted != nil && *resp.Accepted != len(batch) {
+			// 筆數不符不影響 at-least-once：200 即代表後端已 commit，冪等 upsert 下重複/
+			// 被勝出規則略過的事件也算處理完成；僅記 log 供追查。
+			u.log.Warn("uploader: accepted count differs from batch size",
+				"accepted", *resp.Accepted, "sent", len(batch))
+		}
 		return eventIDs(batch), false
 	case http.StatusUnauthorized, http.StatusForbidden:
 		// 撤銷夾帶檢查：自清憑證（含金鑰庫 Refresh Token）。

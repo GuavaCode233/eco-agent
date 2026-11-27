@@ -88,6 +88,13 @@ func (m *MockIngestServer) handleIngest(w http.ResponseWriter, r *http.Request) 
 		m.received = append(m.received, rb)
 		status := m.status
 		m.mu.Unlock()
+		if status == http.StatusOK {
+			// 比照正式端點回應形狀 {"accepted": N}。
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(status)
+			_ = json.NewEncoder(w).Encode(map[string]int{"accepted": len(rb.Events)})
+			return
+		}
 		w.WriteHeader(status)
 		return
 	}

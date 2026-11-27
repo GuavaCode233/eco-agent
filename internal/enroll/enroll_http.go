@@ -2,8 +2,9 @@ package enroll
 
 // 本檔實作 §3 綁定五端點真串的 HTTP 往返（docs/Eco-Agent_後端串接改動清單.md §3）：
 // 索取 binding_code（端點①）→ 顯示 QR URI（②，純 log）→ 輪詢核銷（③）→ 寫入憑證；
-// 以及 refreshAccessTokenLocked 呼叫的換發端點（④）。端點⑤（撤銷）由管理端觸發，
-// Agent 不呼叫，見 Unbind 註解。
+// refreshAccessTokenLocked 呼叫的換發端點（④）；以及 Unbind 呼叫的員工端解綁端點
+// （POST /api/agent/unbind，進度表 6.1）。端點⑤（撤銷他人／本人綁定）由 App 觸發，
+// Agent 不呼叫——Agent 側撤銷偵測走上傳回應 401/403（見 ClearCredentials）。
 //
 // 僅在 e.baseURL 非空時被呼叫（見 enroll.go 的 bindLocked／refreshAccessTokenLocked）；
 // baseURL 為空即代表未設定後端，維持 mock 捷徑，不會走到本檔任何函式。
@@ -198,4 +199,11 @@ func (e *Enroller) refreshAccessTokenHTTP(ctx context.Context, refreshToken stri
 	status, err := e.doJSON(ctx, http.MethodPost, e.apiURL(config.PathTokenRefresh), nil,
 		tokenRefreshRequest{RefreshToken: refreshToken}, &out)
 	return out, status, err
+}
+
+// unbindHTTP 呼叫員工端解綁端點（進度表 6.1）：Bearer 帶 Agent Access Token、無 body。
+// 回傳狀態碼供呼叫端記 log；200 = 已撤銷，401 = token 無效，403 = 已是撤銷狀態。
+func (e *Enroller) unbindHTTP(ctx context.Context, accessToken string) (int, error) {
+	return e.doJSON(ctx, http.MethodPost, e.apiURL(config.PathUnbind),
+		map[string]string{"Authorization": "Bearer " + accessToken}, nil, nil)
 }

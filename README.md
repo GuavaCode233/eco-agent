@@ -142,9 +142,9 @@ grep -rn "TODO(backend)\|TODO(secrets)\|TODO(platform)\|MOCK:" --include="*.go" 
 
 | 標記 | 含義 | 現有數量 |
 |------|------|---------|
-| `TODO(backend)` | 等後端 API 就緒才能替換（綁定、配置下發、真實上傳端點、撤銷回應、印表機位址下發） | 26 |
+| `TODO(backend)` | 等後端 API 就緒才能替換（現剩：sensor_config 版本比對 P2、idle 閾值／印表機位址下發、即時功耗覆蓋） | 6 |
 | `TODO(secrets)` | 需人工填入的憑證（Google OAuth） | 4 |
 | `TODO(platform)` | 需補真實 OS 實作（金鑰庫 DPAPI/Keychain 等） | 2 |
-| `MOCK:` | 目前回傳假值的函式/常數（mock token、mock 端點、mock sampler、mock SNMP responder） | 15 |
+| `MOCK:` | 目前回傳假值的函式/常數（mock token、mock 端點、mock sampler、mock SNMP responder；未設 base URL 時的綁定／token 捷徑） | 14 |
 
-> 數量隨開發演進，以上為 Step 3.M 完成時的快照；實際以 grep 結果為準。
+> 數量隨開發演進，以上為後端串接（進度表 #1–#7、6.1 Agent 端）完成時的快照；實際以 grep 結果為準。

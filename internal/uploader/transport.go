@@ -44,12 +44,19 @@ type Batch struct {
 	Events      []queue.Event
 }
 
-// Response 是上傳回應（現僅需狀態碼供 at-least-once 與撤銷夾帶檢查）。
+// Response 是上傳回應：狀態碼供 at-least-once 與撤銷夾帶檢查；Accepted 為 200 回應 body
+// {"accepted": N} 的筆數，僅供記 log 比對（body 缺漏或無法解析時為 nil，不影響清佇列語意）。
 type Response struct {
 	StatusCode int
+	Accepted   *int
 }
 
-// Sender 送出一批資料（HTTPS POST）；現階段打 mock 端點（§7）。
+// ingestResponse 是 POST /api/agent/digital-usage/batch 成功時的回應 body。
+type ingestResponse struct {
+	Accepted *int `json:"accepted"`
+}
+
+// Sender 送出一批資料（HTTPS POST）。
 type Sender interface {
 	Send(ctx context.Context, b Batch) (Response, error)
 }
@@ -98,26 +105,26 @@ func wireEventOf(e queue.Event) map[string]any {
 	return m
 }
 
-// MockHTTPSender 打 mock HTTP 端點（§7）。傳輸形狀與真實 HTTPS 上傳一致（POST JSON、
-// Authorization: Bearer、以狀態碼表達結果），僅端點為本機 mock。
+// HTTPSender 以 HTTPS POST 送出批次至後端 ingest 端點 POST /api/agent/digital-usage/batch
+// （[D13]；端點由 New() 決定，見本檔上方優先順序）。也可指向本機 mock server（cmd/mock-ingest），
+// 傳輸形狀相同（POST JSON、Authorization: Bearer、以狀態碼表達結果）。
 //
-// TODO(backend): 改打後端 REST ingest 端點 POST {base_url}/digital-usage/batch（[D13]）；
-// 屆時只換此 Sender 的 url 與 TLS 設定，Uploader 不動。
-type MockHTTPSender struct {
+// TLS 走 Go 預設設定（系統根憑證驗證），後端為公開 CA 簽發之 HTTPS 即可直接使用。
+type HTTPSender struct {
 	url    string
 	client *http.Client
 }
 
-// NewMockHTTPSender 建立指向 url 的 mock HTTP 送出器。
-func NewMockHTTPSender(url string) *MockHTTPSender {
-	return &MockHTTPSender{
+// NewHTTPSender 建立指向 url 的 HTTP 送出器。
+func NewHTTPSender(url string) *HTTPSender {
+	return &HTTPSender{
 		url:    url,
 		client: &http.Client{Timeout: 10 * time.Second},
 	}
 }
 
-// Send 實作 Sender：POST 去識別化 JSON 至 mock 端點，Authorization 夾帶 Access Token。
-func (s *MockHTTPSender) Send(ctx context.Context, b Batch) (Response, error) {
+// Send 實作 Sender：POST 去識別化 JSON 至上傳端點，Authorization 夾帶 Access Token。
+func (s *HTTPSender) Send(ctx context.Context, b Batch) (Response, error) {
 	body := wireBody{IDToken: b.IDToken}
 	for _, e := range b.Events {
 		body.Events = append(body.Events, wireEventOf(e))
@@ -131,7 +138,7 @@ func (s *MockHTTPSender) Send(ctx context.Context, b Batch) (Response, error) {
 		return Response{}, fmt.Errorf("uploader: build request: %w", err)
 	}
 	req.Header.Set("Content-Type", "application/json")
-	// MOCK: token 為 mock 常數（§7）；真實流程帶後端簽發的短期 Access Token。
+	// Access Token 來自 enroll（設定 base URL 時為後端簽發的短期 token；否則為 mock 常數）。
 	req.Header.Set("Authorization", "Bearer "+b.AccessToken)
 
 	resp, err := s.client.Do(req)
@@ -139,6 +146,13 @@ func (s *MockHTTPSender) Send(ctx context.Context, b Batch) (Response, error) {
 		return Response{}, fmt.Errorf("uploader: send: %w", err)
 	}
 	defer resp.Body.Close()
+	out := Response{StatusCode: resp.StatusCode}
+	if resp.StatusCode == http.StatusOK {
+		var ir ingestResponse
+		if json.NewDecoder(resp.Body).Decode(&ir) == nil {
+			out.Accepted = ir.Accepted
+		}
+	}
 	_, _ = io.Copy(io.Discard, resp.Body)
-	return Response{StatusCode: resp.StatusCode}, nil
+	return out, nil
 }

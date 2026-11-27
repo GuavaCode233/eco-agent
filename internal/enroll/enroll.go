@@ -398,11 +398,34 @@ func (e *Enroller) clearLocked() error {
 
 // Unbind 員工端主動解除綁定（換機）：清本機憑證，但不設終止態——之後可再次綁定。
 //
-// 不呼叫後端解綁端點（POST device-bindings/{id}/revoke）：該端點是管理端觸發的動作，
-// 不是 Agent 呼叫的——Agent 側撤銷偵測已正確掛在上傳回應 401/403（見 ClearCredentials）。
-// 本函式僅清本機憑證即符合設計（docs/Eco-Agent_後端串接改動清單.md §3.3）。
+// 已設定後端 base URL 時，先呼叫 POST /api/agent/unbind（進度表 6.1）讓後端撤銷本裝置的
+// device_binding；**呼叫失敗（離線／401／403／取不到 Access Token）一律不阻擋解綁**，
+// 僅記 log 後照清本機憑證——員工的解綁意圖以本機為準，後端殘留的 active 綁定會在同裝置
+// 重綁時由②自動撤銷。未設定 base URL 時維持 mock 捷徑：只清本機。
 func (e *Enroller) Unbind(ctx context.Context) error {
 	e.mu.Lock()
 	defer e.mu.Unlock()
+	if e.baseURL != "" && !e.revoked {
+		e.unbindRemoteLocked(ctx)
+	}
 	return e.clearLocked()
+}
+
+// unbindRemoteLocked 盡力呼叫後端解綁端點；任何失敗只記 log，不回傳錯誤。
+func (e *Enroller) unbindRemoteLocked(ctx context.Context) {
+	if e.accessToken == "" || !e.now().Before(e.accessTokenExpiry) {
+		if err := e.refreshAccessTokenLocked(ctx); err != nil {
+			e.log.Warn("enroll: unbind: no access token, clearing local credentials only", "err", err)
+			return
+		}
+	}
+	status, err := e.unbindHTTP(ctx, e.accessToken)
+	switch {
+	case err != nil:
+		e.log.Warn("enroll: unbind request failed, clearing local credentials only", "err", err)
+	case status == http.StatusOK:
+		e.log.Info("enroll: backend binding revoked")
+	default:
+		e.log.Warn("enroll: unbind returned non-200, clearing local credentials only", "status", status)
+	}
 }

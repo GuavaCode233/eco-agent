@@ -250,3 +250,77 @@ func TestRefreshAccessTokenHTTP401ClearsCredentialsNotRevoked(t *testing.T) {
 		t.Fatal("IsBound = true after 401 refresh cleared credentials")
 	}
 }
+
+// newUnbindServer 建立處理④換發與 6.1 解綁的假後端；解綁回 unbindStatus，並記錄收到的
+// Authorization header 與呼叫次數。
+func newUnbindServer(t *testing.T, unbindStatus int, gotAuth *atomic.Value, unbindCalls *int32) *httptest.Server {
+	t.Helper()
+	mux := http.NewServeMux()
+	mux.HandleFunc("POST "+config.PathTokenRefresh, func(w http.ResponseWriter, r *http.Request) {
+		writeJSON(t, w, map[string]any{"access_token": "real-access", "token_type": "bearer", "expires_in": 3600})
+	})
+	mux.HandleFunc("POST "+config.PathUnbind, func(w http.ResponseWriter, r *http.Request) {
+		atomic.AddInt32(unbindCalls, 1)
+		gotAuth.Store(r.Header.Get("Authorization"))
+		w.WriteHeader(unbindStatus)
+		if unbindStatus == http.StatusOK {
+			_ = json.NewEncoder(w).Encode(map[string]any{"revoked": true})
+		}
+	})
+	srv := httptest.NewServer(mux)
+	t.Cleanup(srv.Close)
+	return srv
+}
+
+// TestUnbindCallsBackendThenClears 驗證 6.1：Unbind 以 Agent Access Token 呼叫
+// POST /api/agent/unbind；不論後端回 200 或 401/403，本機憑證都被清除且可再綁定（非終止態）。
+func TestUnbindCallsBackendThenClears(t *testing.T) {
+	for _, status := range []int{http.StatusOK, http.StatusUnauthorized, http.StatusForbidden} {
+		t.Run(http.StatusText(status), func(t *testing.T) {
+			ctx := context.Background()
+			var auth atomic.Value
+			var calls int32
+			srv := newUnbindServer(t, status, &auth, &calls)
+			e, kc := newRealFlowEnroller(t, srv)
+			if err := kc.Set(keyRefreshToken, "rt"); err != nil {
+				t.Fatal(err)
+			}
+			if err := kc.Set(keyIDToken, "idt"); err != nil {
+				t.Fatal(err)
+			}
+
+			if err := e.Unbind(ctx); err != nil {
+				t.Fatalf("Unbind: %v", err)
+			}
+			if n := atomic.LoadInt32(&calls); n != 1 {
+				t.Fatalf("unbind calls = %d, want 1", n)
+			}
+			if got, _ := auth.Load().(string); got != "Bearer real-access" {
+				t.Fatalf("Authorization = %q, want %q", got, "Bearer real-access")
+			}
+			if bound, _ := e.IsBound(); bound {
+				t.Fatal("still bound after Unbind")
+			}
+			if _, err := e.IDToken(); !errors.Is(err, ErrNotBound) {
+				t.Fatalf("IDToken after Unbind = %v, want ErrNotBound", err)
+			}
+		})
+	}
+}
+
+// TestUnbindOfflineStillClears 驗證 6.1：後端連不上時 Unbind 不回錯、仍清本機憑證。
+func TestUnbindOfflineStillClears(t *testing.T) {
+	ctx := context.Background()
+	srv := httptest.NewServer(http.NotFoundHandler())
+	e, kc := newRealFlowEnroller(t, srv)
+	srv.Close() // 模擬離線
+	if err := kc.Set(keyRefreshToken, "rt"); err != nil {
+		t.Fatal(err)
+	}
+	if err := e.Unbind(ctx); err != nil {
+		t.Fatalf("Unbind offline: %v", err)
+	}
+	if bound, _ := e.IsBound(); bound {
+		t.Fatal("still bound after offline Unbind")
+	}
+}

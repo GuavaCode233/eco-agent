@@ -14,6 +14,8 @@ const (
 	PathBindingCode = "/api/agent/binding-code"
 	// PathTokenRefresh：以 Refresh Token 換發 Access Token（§3.2）。
 	PathTokenRefresh = "/api/agent/token/refresh"
+	// PathUnbind：員工端主動解綁（進度表 6.1；Bearer <Agent access token>，無 body）。
+	PathUnbind = "/api/agent/unbind"
 	// PathDigitalUsageBatch：批次上傳去識別化資料（§5）。
 	PathDigitalUsageBatch = "/api/agent/digital-usage/batch"
 )

@@ -1,18 +1,22 @@
 package uploader
 
 import (
+	"context"
+	"net/http"
+	"net/http/httptest"
 	"testing"
 
 	"eco-agent/internal/config"
+	"eco-agent/internal/queue"
 )
 
 // senderURL 取出 New() 未被 WithUploadURL/WithSender 覆寫時，內部預設建立的
-// MockHTTPSender 目標 URL，供以下測試斷言 §5 的優先順序邏輯。
+// HTTPSender 目標 URL，供以下測試斷言 §5 的優先順序邏輯。
 func senderURL(t *testing.T, u *Uploader) string {
 	t.Helper()
-	s, ok := u.sender.(*MockHTTPSender)
+	s, ok := u.sender.(*HTTPSender)
 	if !ok {
-		t.Fatalf("sender type = %T, want *MockHTTPSender", u.sender)
+		t.Fatalf("sender type = %T, want *HTTPSender", u.sender)
 	}
 	return s.url
 }
@@ -51,5 +55,32 @@ func TestNewFallsBackToDefaultUploadURLWhenBaseURLEmpty(t *testing.T) {
 
 	if got := senderURL(t, u); got != DefaultUploadURL {
 		t.Errorf("upload URL = %q, want DefaultUploadURL %q", got, DefaultUploadURL)
+	}
+}
+
+// TestHTTPSenderParsesAccepted 驗證 HTTPSender 解析 200 回應的 {"accepted": N}；
+// 非 200 或無 body 時 Accepted 為 nil。
+func TestHTTPSenderParsesAccepted(t *testing.T) {
+	m := NewMockIngestServer(http.StatusOK)
+	srv := httptest.NewServer(m.Handler())
+	defer srv.Close()
+
+	s := NewHTTPSender(srv.URL + "/mock/ingest")
+	evs := []queue.Event{{ID: "e1", PathType: queue.PathComputer, UsageDate: "2026-11-27"}, {ID: "e2", PathType: queue.PathComputer, UsageDate: "2026-11-27"}}
+	resp, err := s.Send(context.Background(), Batch{IDToken: "idt", AccessToken: "at", Events: evs})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resp.StatusCode != http.StatusOK || resp.Accepted == nil || *resp.Accepted != 2 {
+		t.Fatalf("resp = %+v (accepted %v), want 200 accepted=2", resp, resp.Accepted)
+	}
+
+	m.SetStatus(http.StatusForbidden)
+	resp, err = s.Send(context.Background(), Batch{IDToken: "idt", AccessToken: "at", Events: evs})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resp.StatusCode != http.StatusForbidden || resp.Accepted != nil {
+		t.Fatalf("resp = %+v, want 403 with nil Accepted", resp)
 	}
 }

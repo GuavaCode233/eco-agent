@@ -11,6 +11,9 @@
 //
 // 執行：go run ./cmd/eco-agent
 //
+// 員工端主動解綁（換機，進度表 6.1）：go run ./cmd/eco-agent -unbind
+// ——呼叫後端 POST /api/agent/unbind（失敗不阻擋）並清除本機憑證後結束。
+//
 // 環境變數（詳見 .env.example）：
 //   - ECO_AGENT_PROFILE=testing 可切換為測試參數（數分鐘內觀察完整流程），預設正式值。
 //   - ECO_AGENT_API_BASE_URL 覆寫後端 base URL；留空則依 profile 預設值，且裝置綁定/上傳
@@ -24,12 +27,14 @@ package main
 import (
 	"context"
 	"errors"
+	"flag"
 	"fmt"
 	"log/slog"
 	"os"
 	"os/signal"
 	"path/filepath"
 	"syscall"
+	"time"
 
 	"eco-agent/internal/config"
 	"eco-agent/internal/enroll"
@@ -44,7 +49,15 @@ import (
 // EnvQueuePath 覆寫佇列 SQLite 檔案路徑。
 const EnvQueuePath = "ECO_AGENT_QUEUE_PATH"
 
+// bindRetryInterval 是綁定失敗（後端不可達、員工未於 bindingCodeTTL 內掃碼）後重新索取
+// 綁定碼前的等待時間。綁定是開機必經步驟，失敗不應讓 Agent 退出，而是持續重試直到成功
+// 或收到關機訊號。
+const bindRetryInterval = 30 * time.Second
+
 func main() {
+	unbind := flag.Bool("unbind", false, "員工端主動解綁：通知後端並清除本機憑證後結束")
+	flag.Parse()
+
 	log := slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelInfo}))
 	slog.SetDefault(log)
 
@@ -78,7 +91,19 @@ func main() {
 		enroll.WithBindingCodeTTL(cfg.BindingCodeTTL),
 		enroll.WithLogger(log),
 	)
-	if err := enr.EnsureBound(ctx); err != nil {
+	if *unbind {
+		if err := enr.Unbind(ctx); err != nil {
+			fatal(log, "Unbind", err)
+		}
+		log.Info("device unbound, local credentials cleared")
+		return
+	}
+
+	if err := ensureBoundWithRetry(ctx, enr, log); err != nil {
+		if errors.Is(err, context.Canceled) {
+			log.Info("eco-agent stopped before binding completed (shutdown signal)")
+			return
+		}
 		fatal(log, "EnsureBound", err)
 	}
 	log.Info("device bound")
@@ -98,6 +123,30 @@ func main() {
 		log.Warn("eco-agent stopped (credentials revoked)")
 	default:
 		log.Warn("eco-agent stopped", "err", err)
+	}
+}
+
+// ensureBoundWithRetry 反覆呼叫 EnsureBound 直到綁定成功。暫時性失敗（後端不可達、綁定碼
+// 逾時未掃）等待 bindRetryInterval 後重試（每次重新索取綁定碼）；ErrRevoked 屬終止態、
+// ctx 取消代表關機，兩者直接回傳。
+func ensureBoundWithRetry(ctx context.Context, enr *enroll.Enroller, log *slog.Logger) error {
+	for {
+		err := enr.EnsureBound(ctx)
+		if err == nil {
+			return nil
+		}
+		if errors.Is(err, enroll.ErrRevoked) {
+			return err
+		}
+		if ctx.Err() != nil {
+			return ctx.Err()
+		}
+		log.Warn("binding failed, will retry", "err", err, "retry_in", bindRetryInterval)
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(bindRetryInterval):
+		}
 	}
 }
 
