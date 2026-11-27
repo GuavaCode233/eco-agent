@@ -29,20 +29,38 @@ type fakeAgent struct {
 	starts  int32
 }
 
+func (f *fakeAgent) State() agent.State {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.st.State
+}
+
 func (f *fakeAgent) Status(context.Context) agent.Status {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	return f.st
 }
 
+// PauseBinding 比照真實 agent：pauseOK（綁定中）時進入閒置。
 func (f *fakeAgent) PauseBinding() bool {
 	atomic.AddInt32(&f.pauses, 1)
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	if f.pauseOK && f.st.State == agent.StateBinding {
+		f.st.State = agent.StateIdle
+	}
 	return f.pauseOK
 }
 
-func (f *fakeAgent) StartBinding() { atomic.AddInt32(&f.starts, 1) }
+// StartBinding 比照真實 agent：閒置 → 綁定中。
+func (f *fakeAgent) StartBinding() {
+	atomic.AddInt32(&f.starts, 1)
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.st.State == agent.StateIdle {
+		f.st.State = agent.StateBinding
+	}
+}
 
 func (f *fakeAgent) set(st agent.Status) {
 	f.mu.Lock()
@@ -299,4 +317,25 @@ func TestBindingRetryFeedbackAndRetryNow(t *testing.T) {
 	if res, _ := http.Post(strings.Replace(s.URL(), s.token, "wrong", 1)+"retry", "", nil); res.StatusCode != http.StatusNotFound {
 		t.Fatalf("POST retry with wrong token = %d, want 404", res.StatusCode)
 	}
+}
+
+// 頁面已關閉後 agent 又進入綁定中（如解綁後）：給一次寬限期，逾時仍無人開頁即再次暫停並提醒。
+func TestBindingReenteredWhilePageClosedGetsGraceThenPauses(t *testing.T) {
+	ag := &fakeAgent{st: agent.Status{State: agent.StateBound}, pauseOK: false}
+	var closedCalls int32
+	startServer(t, ag,
+		WithHeartbeatTimeout(30*time.Millisecond),
+		WithWatchInterval(5*time.Millisecond),
+		WithOnPageClosed(func() { atomic.AddInt32(&closedCalls, 1) }),
+	)
+	// 已綁定時頁面逾時：判定關閉，但不提醒。
+	eventually(t, "page considered closed", func() bool { return atomic.LoadInt32(&ag.pauses) == 1 })
+
+	// 解綁 → 綁定中（沒有開頁）。
+	ag.mu.Lock()
+	ag.st.State = agent.StateBinding
+	ag.pauseOK = true
+	ag.mu.Unlock()
+	eventually(t, "paused after grace", func() bool { return atomic.LoadInt32(&ag.pauses) == 2 })
+	eventually(t, "reminder after grace", func() bool { return atomic.LoadInt32(&closedCalls) == 1 })
 }

@@ -5,11 +5,13 @@
 // 與四重觸發上傳 → 遇解綁／撤銷／Refresh Token 失效回到綁定，直到收到中斷訊號（相當於
 // 關機/登出前 hook，uploader 搶送零頭）為止。
 //
-// 預設為 headless 模式（尚無系統匣，見 docs/Eco-Agent_系統匣UI規劃.md U3）：沒有綁定頁可
-// 關閉，因此綁定階段維持持續換碼，QR 內容（custom scheme URI）印在 log。
+// 預設以系統匣模式執行（docs/Eco-Agent_系統匣UI規劃.md U2、U3）：啟動本機狀態與綁定網頁，
+// 並在系統匣（Windows 通知區域／macOS 選單列）提供狀態與操作；尚未綁定時自動以瀏覽器開啟
+// 綁定頁。關閉綁定頁約 15 秒後暫停綁定（不再打後端），重新開頁即恢復。系統匣須在 main
+// goroutine 執行，agent 與網頁另開 goroutine。
 //
-// -web：啟動本機狀態與綁定網頁（U2）並以預設瀏覽器開啟；關閉頁面約 15 秒後暫停綁定（不再
-// 打後端），重新開頁即恢復。頁面網址印在 log。U3 加入系統匣後改由系統匣開啟，此旗標屆時移除。
+// -headless：不開系統匣與網頁（供開發、demo 與無桌面環境）。沒有綁定頁可關閉，綁定階段
+// 維持持續換碼，QR 內容（custom scheme URI）印在 log。
 //
 // 各 demo（cmd/*-demo）用假資料、mock sampler、暫存佇列目錄驗證單一環節；本進入點串起
 // 整個生產路徑：真實感測來源（有則真、無則優雅降級）、持久化佇列落地於使用者設定目錄、
@@ -47,6 +49,7 @@ import (
 	"eco-agent/internal/enroll"
 	"eco-agent/internal/platform"
 	"eco-agent/internal/queue"
+	"eco-agent/internal/ui/tray"
 	"eco-agent/internal/ui/web"
 	"eco-agent/internal/uploader"
 )
@@ -57,7 +60,7 @@ const EnvQueuePath = "ECO_AGENT_QUEUE_PATH"
 func main() {
 	unbind := flag.Bool("unbind", false, "員工端主動解綁：先上傳佇列，再通知後端並清除本機憑證後結束")
 	force := flag.Bool("force", false, "搭配 -unbind：佇列仍有送不出去的資料時直接捨棄")
-	withWeb := flag.Bool("web", false, "啟動本機狀態與綁定網頁並以預設瀏覽器開啟（暫時旗標，U3 系統匣完成後移除）")
+	headless := flag.Bool("headless", false, "不開系統匣與狀態網頁，綁定 QR 內容印在 log（開發／demo 用）")
 	flag.Parse()
 
 	log := slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelInfo}))
@@ -104,34 +107,63 @@ func main() {
 		return
 	}
 
-	if *withWeb {
-		startWeb(ctx, ag, log)
+	if !*headless {
+		srv, err := web.New(ag, web.WithLogger(log))
+		if err == nil {
+			runWithTray(ctx, ag, enr, srv, log)
+			return
+		}
+		// 網頁開不起來（例如本機無法 listen）時退回 headless，Agent 本身照常運作。
+		log.Warn("status page unavailable, running headless", "err", err)
 	}
 
-	log.Info("eco-agent started")
-	if err := ag.Run(ctx); err != nil && !errors.Is(err, context.Canceled) {
-		log.Warn("eco-agent stopped", "err", err)
-		return
-	}
-	log.Info("eco-agent stopped (shutdown signal)")
+	log.Info("eco-agent started (headless)")
+	logAgentExit(log, ag.Run(ctx))
 }
 
-// startWeb 啟動本機狀態與綁定網頁並開啟瀏覽器；失敗僅記 log，不影響 Agent 運作。
-func startWeb(ctx context.Context, ag *agent.Agent, log *slog.Logger) {
-	srv, err := web.New(ag, web.WithLogger(log))
-	if err != nil {
-		log.Warn("status page unavailable", "err", err)
-		return
-	}
+// runWithTray 以系統匣模式執行：agent 與網頁在背景 goroutine，系統匣在 main goroutine 阻塞到
+// 結束（選單「結束」、關機訊號、Windows 登出／關機）。系統匣結束時會取消 agent 並等待其完成
+// 關機前搶送。
+func runWithTray(ctx context.Context, ag *agent.Agent, enr *enroll.Enroller, srv *web.Server, log *slog.Logger) {
+	agentCtx, cancel := context.WithCancel(ctx)
+	defer cancel()
+
 	go func() {
-		if err := srv.Serve(ctx); err != nil {
+		if err := srv.Serve(agentCtx); err != nil {
 			log.Warn("status page stopped", "err", err)
 		}
 	}()
 	log.Info("status page", "url", srv.URL())
-	if err := platform.OpenBrowser(srv.URL()); err != nil {
-		log.Warn("could not open browser; open the status page URL manually", "err", err)
+
+	agentDone := make(chan struct{})
+	go func() {
+		defer close(agentDone)
+		logAgentExit(log, ag.Run(agentCtx))
+	}()
+
+	bound, err := enr.IsBound()
+	if err != nil {
+		log.Warn("could not check binding state", "err", err)
 	}
+	log.Info("eco-agent started (system tray)")
+	tray.Run(ctx, tray.Options{
+		Agent:        ag,
+		PageURL:      srv.URL(),
+		AutoOpenPage: !bound, // 首次啟動（尚未綁定）自動開啟綁定頁
+		Cancel:       cancel,
+		AgentDone:    agentDone,
+		OpenBrowser:  platform.OpenBrowser,
+		Confirm:      platform.Confirm,
+		Log:          log,
+	})
+}
+
+func logAgentExit(log *slog.Logger, err error) {
+	if err != nil && !errors.Is(err, context.Canceled) {
+		log.Warn("eco-agent stopped", "err", err)
+		return
+	}
+	log.Info("eco-agent stopped")
 }
 
 // runUnbind 執行 CLI 解綁（先送再丟）；佇列有殘留且未加 -force 時中止。

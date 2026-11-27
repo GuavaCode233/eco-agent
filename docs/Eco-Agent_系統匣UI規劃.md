@@ -80,7 +80,7 @@ agent.Run(ctx) 監督者迴圈（另一個 goroutine）
 |------|------|------|
 | U1 | Agent 核心重構（監督者迴圈，不含 UI） | ✅ |
 | U2 | 本機狀態與綁定網頁 | ✅ |
-| U3 | 系統匣 | ⬜ |
+| U3 | 系統匣 | 🟡 |
 | U4 | Windows 平台補齊（關機／喚醒、單一實例、開機自啟、log 檔、無視窗建置、綁定提醒通知） | ⬜ |
 
 建議依 U1 → U4 順序。U1 完成後現有行為不變，可先單獨合併。
@@ -94,7 +94,7 @@ agent.Run(ctx) 監督者迴圈（另一個 goroutine）
 | U1.2 | `internal/enroll` | 新增 `WithBindingCodeHandler(func(uri string, expiresAt time.Time))`，取代只印 log；新增 `ResetRevoked()` 供 `Rebind()` 使用 | ✅ |
 | U1.3 | `internal/queue` | 新增 `Purge(ctx) (int, error)`，**僅限解綁與撤銷時捨棄殘留資料使用**（其餘情況仍只在後端回 200 後清除，at-least-once 不變） | ✅ |
 | U1.4 | `internal/uploader` | 記錄上次上傳的時間、原因與結果，供 `Status()` 使用（`Flush` 已公開，可直接呼叫） | ✅ |
-| U1.5 | `cmd/eco-agent` | 改用 `agent.Run`；保留 `-headless` 旗標（不開系統匣、log 印主控台，供開發與 demo）。**現況**：系統匣尚未實作，`cmd/eco-agent` 目前一律為 headless；`-headless` 旗標待 U3 加入系統匣時一併新增。CLI `-unbind` 改走「先送再丟」，有殘留時需加 `-force` 才捨棄 | ✅ |
+| U1.5 | `cmd/eco-agent` | 改用 `agent.Run`；保留 `-headless` 旗標（不開系統匣、log 印主控台，供開發與 demo）。**現況**：U3 起預設為系統匣模式，`-headless` 旗標已加入（暫時的 `-web` 旗標已移除）。CLI `-unbind` 改走「先送再丟」，有殘留時需加 `-force` 才捨棄 | ✅ |
 | U1.V | 驗證 | 單元測試：解綁三情境（全部送出／有殘留且同意捨棄／有殘留但取消）、撤銷後 `Rebind`、監督者迴圈能重啟子 ctx、綁定碼逾時立即換碼（不等 30 秒）、進入閒置後不再打後端、`StartBinding` 能從閒置恢復；`-headless` 跑法維持持續換碼（無頁面可關） | ✅ |
 
 ### U2 — 本機狀態與綁定網頁（`internal/ui/web`）
@@ -113,11 +113,11 @@ agent.Run(ctx) 監督者迴圈（另一個 goroutine）
 
 | # | 子項 | 說明 | 狀態 |
 |---|------|------|------|
-| U3.1 | 選單 | 見下方選單表 | ⬜ |
-| U3.2 | 首次啟動 | 未綁定時自動以預設瀏覽器開啟綁定頁 | ⬜ |
-| U3.3 | 確認框 | 新增 `platform.Confirm(title, msg) bool`：Windows 用 `MessageBoxW`；macOS 用 `osascript display dialog` | ⬜ |
-| U3.4 | 圖示 | `assets/icon.ico`（Windows）與 `assets/icon.png`（macOS），`go:embed` 打包；先放佔位圖示，**正式圖示待提供** | ⬜ |
-| U3.V | 驗證 | 手動測試，見第 6 節 | ⬜ |
+| U3.1 | 選單 | 見下方選單表。「開機自動啟動」勾選框待 U4.4 一併加入；Windows 左鍵與右鍵皆開啟選單（systray 預設） | ✅ |
+| U3.2 | 首次啟動 | 未綁定時自動以預設瀏覽器開啟綁定頁（以金鑰庫是否有憑證判斷；另外 agent 從其他狀態回到「綁定中」而頁面未開時，網頁心跳監看會給一次 15 秒寬限期，逾時即暫停並觸發提醒，避免沒人看頁面時無限換碼） | ✅ |
+| U3.3 | 確認框 | 新增 `platform.Confirm(title, msg) bool`：Windows 用 `MessageBoxW`；macOS 用 `osascript display dialog`；預設按鈕為「否」，不支援的平台一律回 false | ✅ |
+| U3.4 | 圖示 | `assets/icon.ico`（Windows）與 `assets/icon.png`（macOS），`go:embed` 打包；先放佔位圖示，**正式圖示待提供**。**現況**：佔位圖示放在 `internal/ui/tray/icons/`，分 `icon_ok`（已綁定，綠）與 `icon_warn`（未綁定／已撤銷，琥珀）兩組 .ico／.png | ✅ |
+| U3.V | 驗證 | 手動測試，見第 6 節。自動化：`viewOf` 單元測試涵蓋各狀態的狀態列文字與項目可用性。**待手動驗證**（需在 Windows 桌面實際操作） | ⬜ |
 
 系統匣選單：
 
@@ -135,7 +135,7 @@ agent.Run(ctx) 監督者迴圈（另一個 goroutine）
 
 | # | 子項 | 說明 | 狀態 |
 |---|------|------|------|
-| U4.1 | 關機／登出 hook | `session_windows.go`：在固定 OS 執行緒（`runtime.LockOSThread`）建立**隱藏的一般視窗**（不可用 `HWND_MESSAGE`，它收不到廣播的 `WM_QUERYENDSESSION`）。收到 `WM_QUERYENDSESSION` → `ShutdownBlockReasonCreate`（關機畫面顯示「正在上傳能耗資料」）；收到 `WM_ENDSESSION` → 取消 ctx，**等關機前上傳完成（上限為現有 5 秒 `shutdownTimeout`）才返回**，因為返回後行程即被終止 | ⬜ |
+| U4.1 | 關機／登出 hook | `session_windows.go`：在固定 OS 執行緒（`runtime.LockOSThread`）建立**隱藏的一般視窗**（不可用 `HWND_MESSAGE`，它收不到廣播的 `WM_QUERYENDSESSION`）。收到 `WM_QUERYENDSESSION` → `ShutdownBlockReasonCreate`（關機畫面顯示「正在上傳能耗資料」）；收到 `WM_ENDSESSION` → 取消 ctx，**等關機前上傳完成（上限為現有 5 秒 `shutdownTimeout`）才返回**，因為返回後行程即被終止。**U3 實作時發現**：`fyne.io/systray` 的隱藏視窗已處理 `WM_ENDSESSION`，會在視窗程序內同步呼叫系統匣的 onExit；`internal/ui/tray` 的 onExit 已改為取消 agent 並等待關機前搶送完成（上限 10 秒）才返回，因此系統匣模式下登出／關機已會搶送零頭。U4.1 剩下的工作：`WM_QUERYENDSESSION` 時呼叫 `ShutdownBlockReasonCreate` 顯示原因、實測 Windows 給的時間是否足夠 | ⬜ |
 | U4.2 | 喚醒後補送 | 同一視窗監聽 `WM_POWERBROADCAST`／`PBT_APMRESUMEAUTOMATIC` → `FlushNow()` | ⬜ |
 | U4.3 | 單一實例 | named mutex `Local\EcoAgent`；第二份啟動時提示「已在執行」後退出。macOS 以 lock file 實作 | ⬜ |
 | U4.4 | 開機自啟 | 寫入／刪除 `HKCU\Software\Microsoft\Windows\CurrentVersion\Run`（`x/sys/windows/registry`，不需系統管理員權限）。macOS LaunchAgent 先放空殼，標 `// TODO(platform)` | ⬜ |

@@ -3,6 +3,7 @@ module eco-agent
 go 1.26.4
 
 require (
+	fyne.io/systray v1.12.2
 	github.com/google/uuid v1.6.0
 	github.com/gosnmp/gosnmp v1.44.0
 	github.com/shirou/gopsutil/v4 v4.26.6
@@ -16,6 +17,7 @@ require (
 	github.com/dustin/go-humanize v1.0.1 // indirect
 	github.com/ebitengine/purego v0.10.0 // indirect
 	github.com/go-ole/go-ole v1.2.6 // indirect
+	github.com/godbus/dbus/v5 v5.1.0 // indirect
 	github.com/lufia/plan9stats v0.0.0-20211012122336-39d0f177ccd0 // indirect
 	github.com/mattn/go-isatty v0.0.20 // indirect
 	github.com/ncruces/go-strftime v1.0.0 // indirect

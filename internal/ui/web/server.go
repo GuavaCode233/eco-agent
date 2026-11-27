@@ -52,6 +52,7 @@ const (
 
 // Agent 是網頁依賴的 agent 介面（*agent.Agent 滿足）。
 type Agent interface {
+	State() agent.State
 	Status(ctx context.Context) agent.Status
 	PauseBinding() bool
 	StartBinding()
@@ -164,6 +165,13 @@ func (s *Server) watch(ctx context.Context) {
 
 func (s *Server) checkHeartbeat() {
 	s.mu.Lock()
+	if !s.pageOpen && s.ag.State() == agent.StateBinding {
+		// 頁面已關閉，agent 卻又進入綁定中（解綁、重新綁定、Refresh Token 失效回到綁定）：
+		// 給一次與開頁相同的寬限期。期間若有人開頁就照常綁定；否則逾時後暫停並觸發提醒，
+		// 避免沒人看頁面時無限換碼。
+		s.pageOpen = true
+		s.lastSeen = s.now()
+	}
 	closed := s.pageOpen && s.now().Sub(s.lastSeen) >= s.heartbeatTimeout
 	if closed {
 		s.pageOpen = false
