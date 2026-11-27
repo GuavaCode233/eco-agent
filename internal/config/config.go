@@ -77,6 +77,13 @@ type Config struct {
 	PrinterPollInterval time.Duration
 	// UploadBatchMax：單次上傳批量上限。
 	UploadBatchMax int
+
+	// --- 本機 UI（不在 sensor_config 下發範圍）---
+
+	// BindingReminderDelay：綁定頁關閉後第二次提醒的延遲。
+	BindingReminderDelay time.Duration
+	// BindingReminderCooldown：距上次提醒未滿此時間，關頁時略過「立即」那次提醒。
+	BindingReminderCooldown time.Duration
 }
 
 // Load 回傳目前生效的配置：先依環境變數決定的 Profile 取本機常數為預設／fallback，

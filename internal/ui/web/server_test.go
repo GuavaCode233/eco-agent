@@ -231,6 +231,7 @@ func TestHeartbeatTimeoutPausesAndReopenResumes(t *testing.T) {
 	var closedCalls int32
 	s := startServer(t, ag,
 		WithHeartbeatTimeout(40*time.Millisecond),
+		WithOpenGrace(40*time.Millisecond),
 		WithWatchInterval(5*time.Millisecond),
 		WithOnPageClosed(func() { atomic.AddInt32(&closedCalls, 1) }),
 	)
@@ -265,6 +266,7 @@ func TestPageClosedWhileBoundNoReminder(t *testing.T) {
 	var closedCalls int32
 	startServer(t, ag,
 		WithHeartbeatTimeout(20*time.Millisecond),
+		WithOpenGrace(20*time.Millisecond),
 		WithWatchInterval(5*time.Millisecond),
 		WithOnPageClosed(func() { atomic.AddInt32(&closedCalls, 1) }),
 	)
@@ -325,6 +327,7 @@ func TestBindingReenteredWhilePageClosedGetsGraceThenPauses(t *testing.T) {
 	var closedCalls int32
 	startServer(t, ag,
 		WithHeartbeatTimeout(30*time.Millisecond),
+		WithOpenGrace(30*time.Millisecond),
 		WithWatchInterval(5*time.Millisecond),
 		WithOnPageClosed(func() { atomic.AddInt32(&closedCalls, 1) }),
 	)
@@ -338,4 +341,72 @@ func TestBindingReenteredWhilePageClosedGetsGraceThenPauses(t *testing.T) {
 	ag.mu.Unlock()
 	eventually(t, "paused after grace", func() bool { return atomic.LoadInt32(&ag.pauses) == 2 })
 	eventually(t, "reminder after grace", func() bool { return atomic.LoadInt32(&closedCalls) == 1 })
+}
+
+func postClosed(t *testing.T, s *Server) {
+	t.Helper()
+	res, err := http.Post(s.URL()+"closed", "text/plain", strings.NewReader(""))
+	if err != nil {
+		t.Fatal(err)
+	}
+	res.Body.Close()
+	if res.StatusCode != http.StatusNoContent {
+		t.Fatalf("POST closed = %d, want 204", res.StatusCode)
+	}
+}
+
+// 背景分頁：瀏覽器把心跳節流到遠低於 2 秒一次，但仍在心跳逾時內 → 不可判定關閉、不提醒。
+// （此處以 300ms 逾時、每 150ms 一次心跳，模擬 3 分鐘逾時與約每分鐘一次的節流心跳。）
+func TestThrottledBackgroundTabNotTreatedAsClosed(t *testing.T) {
+	ag := &fakeAgent{st: agent.Status{State: agent.StateBinding}, pauseOK: true}
+	var reminders int32
+	s := startServer(t, ag,
+		WithHeartbeatTimeout(300*time.Millisecond),
+		WithCloseGrace(20*time.Millisecond),
+		WithWatchInterval(5*time.Millisecond),
+		WithOnPageClosed(func() { atomic.AddInt32(&reminders, 1) }),
+	)
+	for i := 0; i < 8; i++ {
+		get(t, s.URL()+"status.json")
+		time.Sleep(150 * time.Millisecond)
+	}
+	if p, r := atomic.LoadInt32(&ag.pauses), atomic.LoadInt32(&reminders); p != 0 || r != 0 {
+		t.Fatalf("throttled tab: pauses=%d reminders=%d, want 0/0", p, r)
+	}
+}
+
+// 關閉分頁：收到關閉訊號後 closeGrace 內無心跳 → 立即判定關閉並提醒（不必等心跳逾時）。
+func TestCloseBeaconPausesQuickly(t *testing.T) {
+	ag := &fakeAgent{st: agent.Status{State: agent.StateBinding}, pauseOK: true}
+	var reminders int32
+	s := startServer(t, ag,
+		WithHeartbeatTimeout(time.Hour),
+		WithCloseGrace(30*time.Millisecond),
+		WithWatchInterval(5*time.Millisecond),
+		WithOnPageClosed(func() { atomic.AddInt32(&reminders, 1) }),
+	)
+	get(t, s.URL()+"status.json")
+	postClosed(t, s)
+	eventually(t, "paused after close beacon", func() bool { return atomic.LoadInt32(&ag.pauses) == 1 })
+	eventually(t, "reminder after close beacon", func() bool { return atomic.LoadInt32(&reminders) == 1 })
+}
+
+// 重新整理：pagehide 也會送出關閉訊號，但新頁面隨即送心跳 → 不暫停、不提醒、也不重複 StartBinding。
+func TestReloadDoesNotPause(t *testing.T) {
+	ag := &fakeAgent{st: agent.Status{State: agent.StateBinding}, pauseOK: true}
+	var reminders int32
+	s := startServer(t, ag,
+		WithHeartbeatTimeout(time.Hour),
+		WithCloseGrace(150*time.Millisecond),
+		WithWatchInterval(5*time.Millisecond),
+		WithOnPageClosed(func() { atomic.AddInt32(&reminders, 1) }),
+	)
+	get(t, s.URL()+"status.json")
+	postClosed(t, s)
+	get(t, s.URL()) // 新頁面載入
+	get(t, s.URL()+"status.json")
+	time.Sleep(300 * time.Millisecond)
+	if p, r, st := atomic.LoadInt32(&ag.pauses), atomic.LoadInt32(&reminders), atomic.LoadInt32(&ag.starts); p != 0 || r != 0 || st != 0 {
+		t.Fatalf("reload: pauses=%d reminders=%d starts=%d, want 0/0/0", p, r, st)
+	}
 }

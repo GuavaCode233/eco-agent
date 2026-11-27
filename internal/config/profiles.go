@@ -29,6 +29,12 @@ const (
 	prodMaxAge                      = 24 * time.Hour
 	prodPrinterPollInterval         = 300 * time.Second // 待實測定案
 	prodUploadBatchMax              = 720
+
+	// 綁定提醒（docs/Eco-Agent_系統匣UI規劃.md §2、U4.7）：綁定頁關閉時立即提醒 1 次、
+	// prodBindingReminderDelay 後再提醒 1 次；距上次提醒未滿 cooldown 則略過「立即」那次。
+	// 本機 UI 參數，不在 sensor_config 下發範圍。
+	prodBindingReminderDelay    = 1 * time.Hour
+	prodBindingReminderCooldown = 10 * time.Minute
 )
 
 // --- 測試值（縮短時間類參數，落在 v12 §4.4.4 測試建議值範圍內）---
@@ -47,6 +53,9 @@ const (
 	testMaxAge                      = 3 * time.Minute    // 建議 2–3 分鐘
 	testPrinterPollInterval         = 5 * time.Second    // 建議 秒級
 	testUploadBatchMax              = prodUploadBatchMax // 無測試值，沿用正式值
+
+	testBindingReminderDelay    = 2 * time.Minute
+	testBindingReminderCooldown = 30 * time.Second
 )
 
 // productionConfig 組出正式值配置。
@@ -64,6 +73,8 @@ func productionConfig() Config {
 		MaxAge:                      prodMaxAge,
 		PrinterPollInterval:         prodPrinterPollInterval,
 		UploadBatchMax:              prodUploadBatchMax,
+		BindingReminderDelay:        prodBindingReminderDelay,
+		BindingReminderCooldown:     prodBindingReminderCooldown,
 	}
 }
 
@@ -82,5 +93,7 @@ func testingConfig() Config {
 		MaxAge:                      testMaxAge,
 		PrinterPollInterval:         testPrinterPollInterval,
 		UploadBatchMax:              testUploadBatchMax,
+		BindingReminderDelay:        testBindingReminderDelay,
+		BindingReminderCooldown:     testBindingReminderCooldown,
 	}
 }

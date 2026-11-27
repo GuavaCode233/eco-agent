@@ -23,10 +23,39 @@ Eco-Sensing 專案的桌面能耗監測 Agent（Desktop Agent）。以 **Go** �
 go build ./...                      # 全專案建置
 go test ./...                       # 全部單元測試
 
-# 交叉編譯（單一靜態執行檔）
-GOOS=windows GOARCH=amd64 go build -o dist/eco-agent.exe ./cmd/eco-agent
-GOOS=darwin  GOARCH=arm64 go build -o dist/eco-agent     ./cmd/eco-agent
+# Windows 正式版（-H windowsgui：無主控台視窗，log 寫入檔案）
+GOOS=windows GOARCH=amd64 go build -ldflags "-H windowsgui" -o dist/eco-agent.exe ./cmd/eco-agent
+
+# Windows 開發版（保留主控台，log 同時印在畫面上）
+GOOS=windows GOARCH=amd64 go build -o dist/eco-agent-console.exe ./cmd/eco-agent
+
+# macOS：金鑰庫與系統匣皆需 cgo，須在 Mac 上建置（無法從 Windows 交叉編譯）
+CGO_ENABLED=1 go build -o dist/eco-agent ./cmd/eco-agent
 ```
+
+### 正式進入點 `cmd/eco-agent`
+
+| 跑法 | 說明 |
+|------|------|
+| `eco-agent` | 系統匣模式（預設）：系統匣圖示＋本機狀態與綁定網頁；尚未綁定時自動開啟綁定頁，關頁後以系統通知提醒綁定 |
+| `eco-agent -headless` | 不開系統匣與網頁，綁定 QR 內容印在 log（開發／demo／無桌面環境） |
+| `eco-agent -unbind [-force]` | 命令列解綁（先送再丟；有送不出去的資料需加 `-force` 才捨棄）。Agent 執行中時請改用系統匣「解除綁定…」 |
+
+- **單一實例**：本機已有 Eco-Agent 執行時，再次啟動會提示「已在執行中」並結束。
+- **log 檔**：Windows `%AppData%\eco-agent\logs\agent.log`、macOS `~/Library/Logs/eco-agent/agent.log`（10MB×3 份輪替）。結束時記一行 `eco-agent stopped reason=<原因>`：
+
+  | reason | 意義 |
+  |--------|------|
+  | `tray_quit` | 員工從系統匣選擇「結束 Eco-Agent」 |
+  | `session_end` | Windows 登出／關機（Eco-Agent 的工作階段視窗收到 `WM_ENDSESSION`） |
+  | `session_end_tray` | Windows 登出／關機（系統匣視窗先收到 `WM_ENDSESSION`） |
+  | `signal_interrupt` | Ctrl+C |
+  | `signal_terminate` | SIGTERM；Windows 主控台建置（未加 `-H windowsgui`）的關閉視窗、登出、關機也會轉成此訊號 |
+  | `agent_exited` | agent 自行結束（非預期，請看前面的 log） |
+  | `unknown` | 無法判斷 |
+- **開機自動啟動**：系統匣勾選「開機自動啟動」（寫入 `HKCU\...\CurrentVersion\Run`）。以 `go run` 執行時不顯示此選項（暫存執行檔每次路徑不同）。
+- **綁定提醒通知**：Windows 會在 `HKCU\Software\Classes\AppUserModelId\Eco-Agent` 登記通知用的程式名稱與圖示。
+- 系統匣、綁定頁、提醒規則等設計見 `docs/Eco-Agent_系統匣UI規劃.md`。
 
 ### 各步驟獨立 demo
 

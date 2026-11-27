@@ -22,7 +22,7 @@ import (
 )
 
 // TestIntegrationPageDrivesBinding 以真實 agent／enroll／網頁對假後端驗證 U2 流程：
-// 頁面顯示 QR → 關頁（心跳逾時）→ 進入閒置、後端不再收到索取綁定碼請求、觸發提醒回呼
+// 頁面顯示 QR → 關頁（關閉訊號）→ 進入閒置、後端不再收到索取綁定碼請求、觸發提醒回呼
 // → 重新開頁 → 恢復換碼 → 掃碼 → 頁面顯示已綁定。
 func TestIntegrationPageDrivesBinding(t *testing.T) {
 	var codeRequests, codeSeq int32
@@ -79,7 +79,7 @@ func TestIntegrationPageDrivesBinding(t *testing.T) {
 
 	var reminders int32
 	srv, err := New(ag, WithLogger(quiet),
-		WithHeartbeatTimeout(60*time.Millisecond), WithWatchInterval(5*time.Millisecond),
+		WithHeartbeatTimeout(time.Hour), WithCloseGrace(30*time.Millisecond), WithWatchInterval(5*time.Millisecond),
 		WithOnPageClosed(func() { atomic.AddInt32(&reminders, 1) }))
 	if err != nil {
 		t.Fatal(err)
@@ -105,7 +105,8 @@ func TestIntegrationPageDrivesBinding(t *testing.T) {
 		t.Fatalf("qr.png = %d", res.StatusCode)
 	}
 
-	// 關頁（停止心跳）→ 閒置、提醒回呼、不再打後端。
+	// 關頁（頁面送出關閉訊號）→ 閒置、提醒回呼、不再打後端。
+	postClosed(t, srv)
 	eventually(t, "idle after page closed", func() bool { return ag.State() == agent.StateIdle })
 	eventually(t, "reminder callback", func() bool { return atomic.LoadInt32(&reminders) == 1 })
 	before := atomic.LoadInt32(&codeRequests)

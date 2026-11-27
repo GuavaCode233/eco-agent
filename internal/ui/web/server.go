@@ -1,10 +1,20 @@
 // Package web 提供 Eco-Agent 的本機狀態與綁定網頁（docs/Eco-Agent_系統匣UI規劃.md U2）。
 //
 // 員工以預設瀏覽器開啟此頁：綁定中顯示 QR（App 掃碼核銷），已綁定顯示佇列與上傳狀態，
-// 已撤銷顯示提示。頁面每 2 秒拉一次 status.json，同時作為心跳：
-//   - 約 15 秒未收到心跳 → 判定頁面已關閉 → agent.PauseBinding()（進入閒置、停止打後端），
-//     並呼叫 WithOnPageClosed 的回呼（U4.7 綁定提醒通知接在這裡）。
-//   - 頁面（重新）開啟、收到心跳 → agent.StartBinding()（從閒置恢復換碼）。
+// 已撤銷顯示提示。
+//
+// 頁面開關偵測（U2.6）：
+//   - 頁面每 2 秒拉一次 status.json 作為心跳；頁面（重新）開啟、收到心跳 → agent.StartBinding()
+//     （從閒置恢復換碼）。
+//   - 頁面關閉時以 navigator.sendBeacon 送出「已關閉」訊號（pagehide）→ 等 closeGrace（5 秒）
+//     仍無心跳即判定關閉 → agent.PauseBinding()（進入閒置、停止打後端），並呼叫
+//     WithOnPageClosed 的回呼（U4.7 綁定提醒通知接在這裡）。等 5 秒是為了排除重新整理：
+//     重新整理也會觸發 pagehide，但新頁面隨即送出心跳，不應暫停或提醒。
+//   - 心跳逾時（heartbeatTimeout，3 分鐘）只是後備：瀏覽器當掉或被強制結束、來不及送出關閉
+//     訊號時才靠它。逾時必須遠大於瀏覽器對背景分頁的計時器節流（Chrome／Edge 最慢約每分鐘
+//     一次），否則頁面在背景或視窗最小化時會被誤判為關閉，造成綁定反覆暫停、每分鐘跳提醒。
+//   - 開頁寬限期（openGrace，15 秒）：Serve 啟動時、以及頁面已關閉而 agent 又進入綁定中時，
+//     預期頁面會被開啟；期間沒有任何心跳即判定關閉，避免沒人看頁面時無限換碼。
 //
 // 安全（U2.5）：
 //   - 只監聽 127.0.0.1（隨機埠），並檢查 Host header，擋 DNS rebinding。
@@ -44,9 +54,11 @@ var indexHTML []byte
 //go:embed assets/app.js
 var appJS []byte
 
-// 預設心跳參數。頁面每 2 秒拉一次 status.json（assets/app.js）。
+// 頁面開關偵測參數（見套件說明）。頁面每 2 秒拉一次 status.json（assets/app.js）。
 const (
-	DefaultHeartbeatTimeout = 15 * time.Second
+	DefaultHeartbeatTimeout = 3 * time.Minute
+	DefaultCloseGrace       = 5 * time.Second
+	DefaultOpenGrace        = 15 * time.Second
 	defaultWatchInterval    = time.Second
 )
 
@@ -64,6 +76,8 @@ type Server struct {
 	log              *slog.Logger
 	token            string
 	heartbeatTimeout time.Duration
+	closeGrace       time.Duration
+	openGrace        time.Duration
 	watchInterval    time.Duration
 	onPageClosed     func()
 	now              func() time.Time
@@ -74,7 +88,7 @@ type Server struct {
 
 	mu       sync.Mutex
 	pageOpen bool
-	lastSeen time.Time
+	deadline time.Time // 頁面視為開啟時，超過此時間仍無心跳即判定關閉
 }
 
 // Option 客製化 Server。
@@ -83,8 +97,14 @@ type Option func(*Server)
 // WithLogger 設定日誌器。
 func WithLogger(l *slog.Logger) Option { return func(s *Server) { s.log = l } }
 
-// WithHeartbeatTimeout 覆寫判定頁面關閉的心跳逾時（測試用）。
+// WithHeartbeatTimeout 覆寫心跳逾時（後備的關閉判定，測試用）。
 func WithHeartbeatTimeout(d time.Duration) Option { return func(s *Server) { s.heartbeatTimeout = d } }
+
+// WithCloseGrace 覆寫收到關閉訊號後的等待時間（排除重新整理，測試用）。
+func WithCloseGrace(d time.Duration) Option { return func(s *Server) { s.closeGrace = d } }
+
+// WithOpenGrace 覆寫等待頁面開啟的寬限期（測試用）。
+func WithOpenGrace(d time.Duration) Option { return func(s *Server) { s.openGrace = d } }
 
 // WithWatchInterval 覆寫檢查心跳的間隔（測試用）。
 func WithWatchInterval(d time.Duration) Option { return func(s *Server) { s.watchInterval = d } }
@@ -104,6 +124,8 @@ func New(ag Agent, opts ...Option) (*Server, error) {
 		log:              slog.Default(),
 		token:            tok,
 		heartbeatTimeout: DefaultHeartbeatTimeout,
+		closeGrace:       DefaultCloseGrace,
+		openGrace:        DefaultOpenGrace,
 		watchInterval:    defaultWatchInterval,
 		now:              time.Now,
 	}
@@ -128,12 +150,12 @@ func (s *Server) URL() string { return "http://" + s.host + "/" + s.token + "/" 
 
 // Serve 開始服務並執行心跳監看，直到 ctx 取消。
 //
-// 啟動時視為頁面「即將開啟」：以現在作為最後心跳時間。若呼叫端隨後開啟瀏覽器卻沒成功
-// （或員工立刻關掉），逾時後同樣會進入閒置並觸發提醒，而不是無限換碼。
+// 啟動時視為頁面「即將開啟」並給 openGrace 寬限期。若呼叫端隨後開啟瀏覽器卻沒成功
+// （或員工立刻關掉），寬限期過後同樣會進入閒置並觸發提醒，而不是無限換碼。
 func (s *Server) Serve(ctx context.Context) error {
 	s.mu.Lock()
 	s.pageOpen = true
-	s.lastSeen = s.now()
+	s.deadline = s.now().Add(s.openGrace)
 	s.mu.Unlock()
 
 	go s.watch(ctx)
@@ -167,12 +189,12 @@ func (s *Server) checkHeartbeat() {
 	s.mu.Lock()
 	if !s.pageOpen && s.ag.State() == agent.StateBinding {
 		// 頁面已關閉，agent 卻又進入綁定中（解綁、重新綁定、Refresh Token 失效回到綁定）：
-		// 給一次與開頁相同的寬限期。期間若有人開頁就照常綁定；否則逾時後暫停並觸發提醒，
+		// 給一次開頁寬限期。期間若有人開頁就照常綁定；否則逾時後暫停並觸發提醒，
 		// 避免沒人看頁面時無限換碼。
 		s.pageOpen = true
-		s.lastSeen = s.now()
+		s.deadline = s.now().Add(s.openGrace)
 	}
-	closed := s.pageOpen && s.now().Sub(s.lastSeen) >= s.heartbeatTimeout
+	closed := s.pageOpen && !s.now().Before(s.deadline)
 	if closed {
 		s.pageOpen = false
 	}
@@ -193,11 +215,26 @@ func (s *Server) heartbeat() {
 	s.mu.Lock()
 	reopened := !s.pageOpen
 	s.pageOpen = true
-	s.lastSeen = s.now()
+	s.deadline = s.now().Add(s.heartbeatTimeout)
 	s.mu.Unlock()
 	if reopened {
 		s.log.Info("web: binding page opened")
 		s.ag.StartBinding()
+	}
+}
+
+// pageClosing 處理頁面送出的關閉訊號：closeGrace 內沒有新心跳（非重新整理）即判定關閉。
+//
+// 註：同時開著多個分頁時，關掉其中一頁也會縮短期限；其餘分頁若在前景，2 秒內的心跳會把期限
+// 延回來，若都在背景（心跳被節流）則可能被判定關閉——屬可接受的邊界情況，重新切回分頁即恢復。
+func (s *Server) pageClosing() {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if !s.pageOpen {
+		return
+	}
+	if d := s.now().Add(s.closeGrace); d.Before(s.deadline) {
+		s.deadline = d
 	}
 }
 
@@ -209,6 +246,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /{token}/status.json", s.withToken(s.handleStatus))
 	mux.HandleFunc("GET /{token}/qr.png", s.withToken(s.handleQR))
 	mux.HandleFunc("POST /{token}/retry", s.withToken(s.handleRetry))
+	mux.HandleFunc("POST /{token}/closed", s.withToken(s.handleClosed))
 	return s.secure(mux)
 }
 
@@ -320,6 +358,12 @@ func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 func (s *Server) handleRetry(w http.ResponseWriter, r *http.Request) {
 	s.heartbeat()
 	s.ag.StartBinding()
+	w.WriteHeader(http.StatusNoContent)
+}
+
+// handleClosed 接收頁面關閉時以 navigator.sendBeacon 送出的訊號（見 pageClosing）。
+func (s *Server) handleClosed(w http.ResponseWriter, r *http.Request) {
+	s.pageClosing()
 	w.WriteHeader(http.StatusNoContent)
 }
 

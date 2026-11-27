@@ -4,19 +4,21 @@ go 1.26.4
 
 require (
 	fyne.io/systray v1.12.2
+	git.sr.ht/~jackmordaunt/go-toast/v2 v2.0.3
 	github.com/google/uuid v1.6.0
 	github.com/gosnmp/gosnmp v1.44.0
 	github.com/shirou/gopsutil/v4 v4.26.6
 	github.com/skip2/go-qrcode v0.0.0-20200617195104-da1b6568686e
 	golang.org/x/oauth2 v0.36.0
 	golang.org/x/sys v0.46.0
+	gopkg.in/natefinch/lumberjack.v2 v2.2.1
 	modernc.org/sqlite v1.54.0
 )
 
 require (
 	github.com/dustin/go-humanize v1.0.1 // indirect
 	github.com/ebitengine/purego v0.10.0 // indirect
-	github.com/go-ole/go-ole v1.2.6 // indirect
+	github.com/go-ole/go-ole v1.3.0 // indirect
 	github.com/godbus/dbus/v5 v5.1.0 // indirect
 	github.com/lufia/plan9stats v0.0.0-20211012122336-39d0f177ccd0 // indirect
 	github.com/mattn/go-isatty v0.0.20 // indirect

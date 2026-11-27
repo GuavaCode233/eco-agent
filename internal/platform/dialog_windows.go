@@ -20,3 +20,15 @@ func confirm(title, message string) bool {
 		windows.MB_YESNO|windows.MB_ICONWARNING|windows.MB_DEFBUTTON2|windows.MB_TOPMOST|windows.MB_SETFOREGROUND)
 	return ret == idYes
 }
+
+func alert(title, message string) {
+	t, err := windows.UTF16PtrFromString(title)
+	if err != nil {
+		return
+	}
+	m, err := windows.UTF16PtrFromString(message)
+	if err != nil {
+		return
+	}
+	windows.MessageBox(0, m, t, windows.MB_OK|windows.MB_ICONINFORMATION|windows.MB_TOPMOST|windows.MB_SETFOREGROUND)
+}

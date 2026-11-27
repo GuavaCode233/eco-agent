@@ -18,3 +18,9 @@ func confirm(title, message string) bool {
 func appleScriptEscape(s string) string {
 	return strings.NewReplacer(`\`, `\`, `"`, `\"`).Replace(s)
 }
+
+func alert(title, message string) {
+	script := `display dialog "` + appleScriptEscape(message) + `" with title "` + appleScriptEscape(title) +
+		`" buttons {"確定"} default button "確定"`
+	_ = exec.Command("osascript", "-e", script).Run()
+}

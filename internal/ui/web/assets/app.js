@@ -1,5 +1,5 @@
-// Eco-Agent 本機狀態頁。每 2 秒拉一次 status.json；這同時是給 Agent 的心跳
-// （Agent 約 15 秒沒收到就判定頁面已關閉，暫停綁定）。
+// Eco-Agent 本機狀態頁。每 2 秒拉一次 status.json；這同時是給 Agent 的心跳。
+// 頁面關閉時送出「已關閉」訊號，Agent 據此暫停綁定並提醒員工（重新整理不算關閉）。
 "use strict";
 
 const POLL_MS = 2000;
@@ -152,4 +152,8 @@ setInterval(tick, 1000);
 // 背景分頁的計時器會被瀏覽器節流；切回分頁時立刻送一次心跳，讓 Agent 馬上恢復綁定。
 document.addEventListener("visibilitychange", () => {
   if (!document.hidden) poll();
+});
+// 關閉分頁／視窗（或重新整理、離開此頁）時通知 Agent。sendBeacon 在頁面卸載時仍會送出。
+window.addEventListener("pagehide", () => {
+  navigator.sendBeacon("closed");
 });

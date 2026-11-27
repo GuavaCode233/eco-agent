@@ -4,3 +4,6 @@ package platform
 // docs/Eco-Agent_系統匣UI規劃.md U3.3）。預設按鈕為「否」：解綁可能捨棄資料，誤按 Enter
 // 不應直接執行。不支援的平台一律回 false（寧可不執行，也不默默同意）。
 func Confirm(title, message string) bool { return confirm(title, message) }
+
+// Alert 顯示只有「確定」按鈕的訊息框（例如「Eco-Agent 已在執行中」）。不支援的平台為 no-op。
+func Alert(title, message string) { alert(title, message) }

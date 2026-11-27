@@ -86,6 +86,9 @@ func TestLoadFetchesSensorConfigOverridesLocalConstants(t *testing.T) {
 		MaxAge:                      15 * time.Second,
 		PrinterPollInterval:         16 * time.Second,
 		UploadBatchMax:              17,
+		// 本機 UI 參數不在 sensor_config 下發範圍，維持 profile 常數。
+		BindingReminderDelay:    prodBindingReminderDelay,
+		BindingReminderCooldown: prodBindingReminderCooldown,
 	}
 	if got != want {
 		t.Errorf("Load() = %+v, want %+v", got, want)

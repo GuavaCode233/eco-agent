@@ -37,6 +37,16 @@ var iconOKPNG []byte
 //go:embed icons/icon_warn.png
 var iconWarnPNG []byte
 
+// IconPNG 回傳「需要注意」圖示的 PNG（供綁定提醒通知使用）。
+func IconPNG() []byte { return iconWarnPNG }
+
+// Autostart 是系統匣「開機自動啟動」勾選框依賴的介面（platform.Autostart 滿足）。
+type Autostart interface {
+	Supported() bool
+	Enabled() (bool, error)
+	SetEnabled(on bool) error
+}
+
 // refreshInterval 是系統匣狀態列的更新間隔。
 const refreshInterval = 2 * time.Second
 
@@ -63,10 +73,23 @@ type Options struct {
 	// ShutdownWait 為結束時等待 agent 搶送零頭的上限（預設 10 秒）。
 	ShutdownWait time.Duration
 
+	// Autostart 為 nil 或不支援（例如 go run 的暫存執行檔）時不顯示「開機自動啟動」。
+	Autostart Autostart
+
+	// SetStopReason 記錄程式結束的原因（先記先贏，見 cmd/eco-agent 的 stopReason）；可為 nil。
+	SetStopReason func(reason string)
+
 	OpenBrowser func(url string) error
 	Confirm     func(title, message string) bool
 	Log         *slog.Logger
 }
+
+// 系統匣回報的結束原因（cmd/eco-agent 記入「eco-agent stopped」log）。
+const (
+	StopReasonTrayQuit       = "tray_quit"        // 員工從系統匣選擇「結束 Eco-Agent」
+	StopReasonAgentExited    = "agent_exited"     // agent 自行結束（非預期）
+	StopReasonTraySessionEnd = "session_end_tray" // Windows 登出／關機：系統匣視窗先收到 WM_ENDSESSION
+)
 
 // Run 建立系統匣並阻塞到結束。ctx 取消（關機訊號）或 agent 結束時系統匣也會結束。
 func Run(ctx context.Context, o Options) {
@@ -84,7 +107,7 @@ type tray struct {
 	o   Options
 	ctx context.Context
 
-	status, open, flush, unbind, rebind, quit *systray.MenuItem
+	status, open, flush, unbind, rebind, autostart, quit *systray.MenuItem
 
 	busy     atomic.Bool // 解綁等長動作進行中，避免重複觸發
 	lastWarn atomic.Int32
@@ -101,6 +124,13 @@ func (t *tray) onReady() {
 	t.rebind = systray.AddMenuItem("重新綁定", "綁定已撤銷，重新掃碼綁定這台電腦")
 	t.rebind.Hide()
 	systray.AddSeparator()
+	if a := t.o.Autostart; a != nil && a.Supported() {
+		on, err := a.Enabled()
+		if err != nil {
+			t.o.Log.Warn("tray: read autostart setting failed", "err", err)
+		}
+		t.autostart = systray.AddMenuItemCheckbox("開機自動啟動", "登入 Windows 時自動啟動 Eco-Agent", on)
+	}
 	t.quit = systray.AddMenuItem("結束 Eco-Agent", "結束程式（會先上傳尚未送出的紀錄）")
 
 	t.lastWarn.Store(-1)
@@ -123,6 +153,7 @@ func (t *tray) loop() {
 			systray.Quit()
 			return
 		case <-t.o.AgentDone:
+			t.stopReason(StopReasonAgentExited)
 			systray.Quit()
 			return
 		case <-tick.C:
@@ -137,11 +168,37 @@ func (t *tray) loop() {
 			t.o.Agent.Rebind()
 			t.refresh()
 			t.openPage()
+		case <-t.autostartClicked():
+			t.toggleAutostart()
 		case <-t.quit.ClickedCh:
+			t.o.Log.Info("tray: quit selected")
+			t.stopReason(StopReasonTrayQuit)
 			systray.Quit()
 			return
 		}
 	}
+}
+
+// autostartClicked 回傳勾選框的點擊 channel；未顯示時回 nil（select 永不觸發）。
+func (t *tray) autostartClicked() <-chan struct{} {
+	if t.autostart == nil {
+		return nil
+	}
+	return t.autostart.ClickedCh
+}
+
+func (t *tray) toggleAutostart() {
+	want := !t.autostart.Checked()
+	if err := t.o.Autostart.SetEnabled(want); err != nil {
+		t.o.Log.Warn("tray: change autostart failed", "err", err)
+		return
+	}
+	if want {
+		t.autostart.Check()
+	} else {
+		t.autostart.Uncheck()
+	}
+	t.o.Log.Info("tray: autostart changed", "enabled", want)
 }
 
 // refresh 依 agent 狀態更新狀態列、圖示與各項目可用狀態。
@@ -218,11 +275,20 @@ func (t *tray) doUnbind() {
 // onExit 於系統匣結束時（含 Windows WM_ENDSESSION）在事件迴圈內同步執行：取消 agent 並等待
 // 其完成關機前搶送，上限 ShutdownWait。
 func (t *tray) onExit() {
+	// 走到這裡卻還沒有原因：不是選單「結束」、也不是關機訊號或 agent 結束，只剩 systray 的
+	// 隱藏視窗收到 WM_ENDSESSION（Windows 登出／關機）這條路。
+	t.stopReason(StopReasonTraySessionEnd)
 	t.o.Cancel()
 	select {
 	case <-t.o.AgentDone:
 	case <-time.After(t.o.ShutdownWait):
 		t.o.Log.Warn("tray: agent did not stop in time", "wait", t.o.ShutdownWait)
+	}
+}
+
+func (t *tray) stopReason(reason string) {
+	if t.o.SetStopReason != nil {
+		t.o.SetStopReason(reason)
 	}
 }
 
