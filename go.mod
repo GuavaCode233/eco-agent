@@ -6,6 +6,7 @@ require (
 	github.com/google/uuid v1.6.0
 	github.com/gosnmp/gosnmp v1.44.0
 	github.com/shirou/gopsutil/v4 v4.26.6
+	github.com/skip2/go-qrcode v0.0.0-20200617195104-da1b6568686e
 	golang.org/x/oauth2 v0.36.0
 	golang.org/x/sys v0.46.0
 	modernc.org/sqlite v1.54.0

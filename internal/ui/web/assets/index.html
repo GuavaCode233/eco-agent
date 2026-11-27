@@ -1,0 +1,118 @@
+<!doctype html>
+<html lang="zh-Hant">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Eco-Agent</title>
+<style>
+  :root {
+    color-scheme: light dark;
+    --bg: #f6f7f5;
+    --card: #ffffff;
+    --text: #1d2420;
+    --muted: #5f6b64;
+    --line: #dfe4e0;
+    --accent: #2f7d4f;
+    --warn: #a15c07;
+    --bad: #b3261e;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #141816;
+      --card: #1d2320;
+      --text: #e6ebe8;
+      --muted: #9aa69f;
+      --line: #2e3632;
+      --accent: #6cc28f;
+      --warn: #e0a24a;
+      --bad: #f0857d;
+    }
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    min-height: 100vh;
+    display: grid;
+    place-items: center;
+    background: var(--bg);
+    color: var(--text);
+    font-family: "Segoe UI", "Microsoft JhengHei", "PingFang TC", system-ui, sans-serif;
+    line-height: 1.6;
+  }
+  main {
+    width: min(440px, calc(100vw - 32px));
+    background: var(--card);
+    border: 1px solid var(--line);
+    border-radius: 12px;
+    padding: 28px;
+  }
+  header { display: flex; align-items: center; gap: 10px; margin-bottom: 20px; }
+  header h1 { font-size: 18px; margin: 0; font-weight: 600; }
+  .dot { width: 10px; height: 10px; border-radius: 50%; background: var(--muted); flex: none; }
+  .dot.bound { background: var(--accent); }
+  .dot.binding, .dot.idle { background: var(--warn); }
+  .dot.revoked { background: var(--bad); }
+  h2 { font-size: 20px; margin: 0 0 6px; }
+  p { margin: 0 0 12px; color: var(--muted); }
+  .qr {
+    display: block;
+    width: 240px;
+    height: 240px;
+    margin: 16px auto;
+    background: #fff;
+    padding: 8px;
+    border-radius: 8px;
+    image-rendering: pixelated;
+  }
+  .countdown { text-align: center; font-variant-numeric: tabular-nums; color: var(--muted); }
+  dl { display: grid; grid-template-columns: auto 1fr; gap: 6px 16px; margin: 16px 0 0; }
+  dt { color: var(--muted); }
+  dd { margin: 0; text-align: right; font-variant-numeric: tabular-nums; }
+  .off { color: var(--muted); }
+  .note { margin-top: 16px; padding: 10px 12px; border-radius: 8px; border: 1px solid var(--line); }
+  [hidden] { display: none !important; }
+</style>
+</head>
+<body>
+<main>
+  <header>
+    <span id="dot" class="dot"></span>
+    <h1>Eco-Agent</h1>
+  </header>
+
+  <section id="view-loading">
+    <p>讀取狀態中…</p>
+  </section>
+
+  <section id="view-binding" hidden>
+    <h2>綁定這台電腦</h2>
+    <p>請用已登入的 Eco-Sensing App 掃描下方 QR Code。綁定完成後，這個頁面會自動更新。</p>
+    <img id="qr" class="qr" alt="綁定用 QR Code">
+    <div id="countdown" class="countdown"></div>
+  </section>
+
+  <section id="view-idle" hidden>
+    <h2>尚未綁定</h2>
+    <p>正在重新產生綁定用的 QR Code…</p>
+  </section>
+
+  <section id="view-bound" hidden>
+    <h2>已綁定</h2>
+    <p>Eco-Agent 正在背景記錄這台電腦的數位能耗，關閉此頁不影響運作。</p>
+    <dl id="details"></dl>
+  </section>
+
+  <section id="view-revoked" hidden>
+    <h2>綁定已被撤銷</h2>
+    <p>這台電腦已停止上傳。如需繼續使用，請從系統匣圖示選擇「重新綁定」。</p>
+    <p id="discarded" class="note" hidden></p>
+  </section>
+
+  <section id="view-offline" hidden>
+    <h2>無法連線到 Eco-Agent</h2>
+    <p>Eco-Agent 可能已經結束。請從開始選單重新啟動 Eco-Agent。</p>
+  </section>
+</main>
+<script src="app.js"></script>
+</body>
+</html>

@@ -108,6 +108,44 @@ Response: `{"accepted": <count>}`（200）；裝置遭撤銷時回 401/403（Age
 - `factor_id`／`co2e_kg` 排碳係數計算不在本次範圍內，批次上傳落庫的 `digital_usage` 列這些欄位維持 `NULL`。
 - 本機開發環境無法連線真實 Supabase 執行個體（DNS 無法解析），已完成的驗證僅止於：路由註冊、Pydantic 模型驗證、認證守門邏輯（401/403）、DB 連線失敗的錯誤處理路徑。**尚未對真實資料庫跑過完整綁定＋上傳生命週期**，正式環境部署前需依 `docs/Eco-Agent_後端串接需求清單_0910.md` 對應章節與本檔第 9 節（見下）補做一次 Swagger 全流程驗證。
 
+### 端點①（索取綁定碼）的兩個並發缺口
+
+`modules/eco_agent/auth.py` 的 `create_or_refresh_binding_code` 以「先查該裝置的 pending 列 → 有就 PATCH、沒有就 POST」達成 upsert，正常情況下一台裝置只會有一列 pending（逾時的碼不會被改成 `expired`，`status` 停在 `pending`，下次索取會更新同一列）。但有兩個缺口：
+
+1. **先查再寫不是原子操作，資料表也沒有唯一約束。** 同一 `device_id` 兩個請求同時進來時，兩邊都查不到 pending 列，就會各新增一列。Agent 端一次只送一個①請求，正常不會觸發；但同一台電腦同時跑兩個 Agent（Agent 端單一實例保護見 `docs/Eco-Agent_系統匣UI規劃.md` U4.3，尚未實作）或網路重送時就可能發生。
+2. **`find_pending_binding_code_for_device` 用 `limit 1` 但沒有 `order`。** 一旦已有重複的 pending 列，每次挑到哪一列不固定：可能 PATCH 到一列、③卻查到另一列的舊碼。
+
+**建議修法**（比照 0005 的做法：應用層照舊，DB 層用 partial unique index 兜底）：
+
+- 新增 migration `0006_binding_code_single_pending.sql`：
+
+  ```sql
+  -- 一台裝置同一時間至多一筆 pending 綁定碼（端點① upsert 的 DB 層兜底）。
+  -- 套用前先把既有重複的 pending 收斂為「每台裝置只留最新的一筆」，否則建 index 會失敗。
+  -- Idempotent: safe to re-run.
+  with ranked as (
+    select id,
+           row_number() over (partition by device_id order by updated_at desc, created_at desc) as rn
+    from public.binding_code
+    where status = 'pending'
+  )
+  update public.binding_code c
+  set status = 'expired',
+      updated_at = now()
+  from ranked r
+  where c.id = r.id
+    and r.rn > 1;
+
+  create unique index if not exists uq_binding_code_pending_device on public.binding_code (device_id)
+    where status = 'pending';
+  ```
+
+- `create_or_refresh_binding_code`：POST 撞到唯一約束（PostgREST 回 409）時，改為重查 pending 列再 PATCH，不要直接回 500。
+- `find_pending_binding_code_for_device`：查詢加上 `order=updated_at.desc`，有了上述 index 後雖不會再有重複，但讓行為在 migration 套用前也是確定的。
+- 測試：`tests/test_agent_binding.py` 補一個「同一 `device_uuid` 連續索取兩次 → 仍只有一列 pending、舊碼呼叫③回 404」的案例（建議驗證流程第 8 步的自動化版本）。
+
+以上皆屬後端範圍，Agent 端不需改動。
+
 ## 建議驗證流程（比照既有 B6「Swagger 全生命週期跑通」慣例）
 
 1. `POST /api/agent/binding-code`（假 `device_uuid`）→ 取得 `code`、`device_secret`。
