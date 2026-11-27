@@ -41,7 +41,7 @@ func withSensorConfigServer(t *testing.T, handler http.HandlerFunc) *httptest.Se
 // 而非巧合等於 profile 本機常數。
 func validSensorConfigResponse() sensorConfigResponse {
 	return sensorConfigResponse{
-		Version:                        7,
+		Version:                        "7",
 		BindingCodeTTLSec:              42,
 		AccessTokenTTLSec:              43,
 		RefreshTokenTTLSec:             44,
@@ -89,6 +89,31 @@ func TestLoadFetchesSensorConfigOverridesLocalConstants(t *testing.T) {
 	}
 	if got != want {
 		t.Errorf("Load() = %+v, want %+v", got, want)
+	}
+}
+
+// TestLoadParsesBackendStringVersion 以後端實際回應原文（schema.py SensorConfigResponse：
+// version 為字串 "1"）驗證 Agent 能解析；防止 version 型別與後端契約不符時整包解析失敗、
+// 靜默 fallback 本機常數（docs/Eco-Agent_後端串接進度表.md sensor_config 範例）。
+func TestLoadParsesBackendStringVersion(t *testing.T) {
+	const backendBody = `{"version":"1","bindingCodeTTL":300,"accessTokenTTL":3600,` +
+		`"refreshTokenTTL":7776000,"computerUsageRecordInterval":61,"driveQuotaInterval":86400,` +
+		`"checkInterval":60,"thresholdCount":60,"maxAge":86400,"printerPollInterval":300,` +
+		`"uploadBatchMax":720}`
+	srv := withSensorConfigServer(t, func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(backendBody))
+	})
+
+	r, err := fetchSensorConfig(srv.URL)
+	if err != nil {
+		t.Fatalf("fetchSensorConfig(backend body) error = %v", err)
+	}
+	if r.Version != "1" {
+		t.Errorf("Version = %q, want %q", r.Version, "1")
+	}
+	if r.ComputerUsageRecordIntervalSec != 61 {
+		t.Errorf("ComputerUsageRecordIntervalSec = %d, want 61", r.ComputerUsageRecordIntervalSec)
 	}
 }
 

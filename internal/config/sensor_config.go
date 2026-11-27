@@ -27,7 +27,10 @@ var sensorConfigHTTPClient = &http.Client{Timeout: sensorConfigTimeout}
 // 其餘數值皆為秒數，1:1 對應 Config 的資料收集與上傳觸發欄位（裝置綁定三個欄位亦一併下發）。
 type sensorConfigResponse struct {
 	// Version 目前僅接收、不使用——版本比對延至 P2（見本檔頂部說明）。
-	Version int `json:"version"`
+	// 型別須與後端契約一致：後端 SensorConfigResponse.version 為字串（如 "1"）。若宣告為 int，
+	// json 解析會因型別不符整包失敗，導致每次開機都靜默 fallback 本機常數。
+	// P2 實作版本比對時，請以字串相等比較（勿假設可轉數字、勿比大小）。
+	Version string `json:"version"`
 
 	BindingCodeTTLSec  int `json:"bindingCodeTTL"`
 	AccessTokenTTLSec  int `json:"accessTokenTTL"`
