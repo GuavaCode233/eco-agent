@@ -292,9 +292,18 @@ func TestRevokedThenRebind(t *testing.T) {
 	h.run(t)
 	h.waitState(t, StateBound)
 
+	h.enqueue(t, 2) // 撤銷前尚未送出的殘留
+
 	h.b.setBound(false) // 撤銷時 uploader 會清憑證
 	close(h.uploaders()[0].revokeCh)
 	h.waitState(t, StateRevoked)
+	// 與解綁同一規則：撤銷時捨棄殘留，避免 Rebind 後以新 id_token 送出（換人時歸錯戶）。
+	eventually(t, "leftover discarded", func() bool {
+		return h.a.Status(context.Background()).DiscardedOnRevoke == 2
+	})
+	if n, _ := h.q.Count(context.Background()); n != 0 {
+		t.Fatalf("queue count after revoke = %d, want 0", n)
+	}
 	eventually(t, "sensors stopped", func() bool { return atomic.LoadInt32(&h.sensors.running) == 0 })
 	if err := h.a.FlushNow(context.Background()); !errors.Is(err, ErrNotBound) {
 		t.Fatalf("FlushNow while revoked = %v, want ErrNotBound", err)
@@ -304,6 +313,9 @@ func TestRevokedThenRebind(t *testing.T) {
 	h.waitState(t, StateBound)
 	if n := atomic.LoadInt32(&h.b.resetRevoke); n != 1 {
 		t.Fatalf("ResetRevoked calls = %d, want 1", n)
+	}
+	if d := h.a.Status(context.Background()).DiscardedOnRevoke; d != 0 {
+		t.Fatalf("DiscardedOnRevoke after Rebind = %d, want 0", d)
 	}
 	if n := len(h.uploaders()); n != 2 {
 		t.Fatalf("uploaders created = %d, want 2 (fresh one after rebind)", n)

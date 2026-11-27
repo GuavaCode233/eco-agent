@@ -7,7 +7,7 @@
 //	  1. 綁定階段：綁定中 ⇄ 尚未綁定（閒置），直到綁定成功
 //	  2. 已綁定階段：開子 ctx 啟動三路徑 + uploader.Run，直到
 //	       - 員工解綁           → 回到 1
-//	       - 偵測到撤銷（401/403）→ 已撤銷，等 Rebind() → 回到 1
+//	       - 偵測到撤銷（401/403）→ 捨棄佇列殘留 → 已撤銷，等 Rebind() → 回到 1
 //	       - Refresh Token 失效 → 回到 1（enroll 已清本機憑證）
 //	       - 關機訊號           → 結束（uploader 搶送零頭）
 //
@@ -84,6 +84,8 @@ type Status struct {
 	QueueCount       int
 	LastUpload       *uploader.Result // 本次綁定期間最近一次上傳結果；尚無則為 nil
 	Paths            map[queue.PathType]bool
+	// DiscardedOnRevoke 為最近一次撤銷時捨棄的佇列筆數（供 UI 告知員工）；Rebind 後歸零。
+	DiscardedOnRevoke int
 }
 
 // Agent 是監督者迴圈。並行安全；Run 只能呼叫一次。
@@ -104,6 +106,7 @@ type Agent struct {
 	bindingExp    time.Time
 	cancelAttempt context.CancelFunc // 綁定中：取消進行中的 EnsureBound
 	sess          *session           // 已綁定：目前的子 session
+	discarded     int                // 最近一次撤銷時捨棄的佇列筆數
 	lastUp        Uploader           // 最近一個 session 的 uploader（供 Status 讀上傳結果）
 	wake          chan struct{}      // 狀態變更時喚醒 Run 迴圈（容量 1）
 }
@@ -222,6 +225,7 @@ func (a *Agent) bindPhase(ctx context.Context) error {
 		case errors.Is(err, enroll.ErrRevoked):
 			// enroll 仍在撤銷終止態（不應發生：Rebind 會先 ResetRevoked）；改走已撤銷等待。
 			a.setState(StateRevoked)
+			a.discardOnRevoke()
 			if err := a.waitRebind(ctx); err != nil {
 				return err
 			}
@@ -291,8 +295,27 @@ loop:
 
 	if revoked {
 		a.log.Warn("agent: credentials revoked, upload stopped; waiting for rebind")
+		a.discardOnRevoke()
 	}
 	return revoked
+}
+
+// discardOnRevoke 於撤銷時清空佇列殘留（與解綁「先送再丟」同一規則，§2）。
+//
+// 撤銷後後端已不接受這台裝置的舊綁定，殘留資料無法再送出；若留到 Rebind 後才送，會以新
+// 綁定的 id_token 歸戶，換人重綁時就算到別人名下。呼叫時三路徑已停止，不會再有新資料寫入。
+func (a *Agent) discardOnRevoke() {
+	n, err := a.q.Purge(context.Background())
+	if err != nil {
+		a.log.Warn("agent: discard queue on revoke failed", "err", err)
+		return
+	}
+	a.mu.Lock()
+	a.discarded = n
+	a.mu.Unlock()
+	if n > 0 {
+		a.log.Warn("agent: discarded queued events of the revoked binding", "count", n)
+	}
 }
 
 // startSessionSensors 啟動三路徑；session 已結束或三路徑已在執行時為 no-op。
@@ -408,6 +431,7 @@ func (a *Agent) Rebind() {
 	}
 	a.binder.ResetRevoked()
 	a.state = StateBinding
+	a.discarded = 0
 	a.mu.Unlock()
 	a.notify()
 }
@@ -513,9 +537,10 @@ func (a *Agent) newUploaderFor(s *session) Uploader {
 func (a *Agent) Status(ctx context.Context) Status {
 	a.mu.Lock()
 	st := Status{
-		State:            a.state,
-		BindingURI:       a.bindingURI,
-		BindingExpiresAt: a.bindingExp,
+		State:             a.state,
+		BindingURI:        a.bindingURI,
+		BindingExpiresAt:  a.bindingExp,
+		DiscardedOnRevoke: a.discarded,
 	}
 	sess := a.sess
 	up := a.lastUp

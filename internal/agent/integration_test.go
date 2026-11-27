@@ -151,6 +151,11 @@ func TestIntegrationBindUploadRevokeRebind(t *testing.T) {
 	}
 	_ = ag.FlushNow(ctx)
 	eventually(t, "revoked", func() bool { return ag.State() == StateRevoked })
+	// 403 那批未送達的資料在撤銷時捨棄，不會留到 Rebind 後以新綁定送出。
+	eventually(t, "leftover discarded on revoke", func() bool { return ag.Status(ctx).DiscardedOnRevoke == 1 })
+	if n, _ := q.Count(ctx); n != 0 {
+		t.Fatalf("queue count after revoke = %d, want 0", n)
+	}
 
 	// 重新綁定：應再次索取綁定碼。
 	be.scanned.Store(false)

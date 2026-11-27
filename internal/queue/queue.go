@@ -412,7 +412,7 @@ func (q *Queue) MarkUploaded(ctx context.Context, ids []string) error {
 
 // Purge 清空佇列中所有待上傳事件，回傳刪除筆數（state 表不受影響）。
 //
-// **僅限員工解綁時捨棄殘留資料使用**（docs/Eco-Agent_系統匣UI規劃.md §2「先送再丟」）：
+// **僅限員工解綁與偵測到撤銷時捨棄殘留資料使用**（docs/Eco-Agent_系統匣UI規劃.md §2）：
 // 上傳以批次當下的 id_token 歸戶，舊綁定的殘留資料若留到換人重綁後才送，會被算到新員工
 // 名下。其餘情況一律只在後端回 200 後以 MarkUploaded 清除（at-least-once 不變）。
 func (q *Queue) Purge(ctx context.Context) (int, error) {
